@@ -1,9 +1,21 @@
+# Tiny offline run on images from baulens.data.synthetic.make_synthetic_cracks (never committed).
 seed: 42
-# Generated on demand by baulens.data.synthetic.make_synthetic_cracks (never committed).
 data_dir: artifacts/smoke/cracks-data
 artifacts_dir: artifacts/cracks/smoke
 architecture: resnet18
+pretrained: false
 image_size: 64
 batch_size: 8
+eval_batch_size: 16
+head_epochs: 1
 epochs: 1
-pretrained: false
+finetune_blocks: 1
+device: cpu
+num_threads: 2
+num_workers: 0
+bootstrap_resamples: 50
+robustness_max_images: 16
+gallery_size: 4
+parity_images: 8
+benchmark_warmup: 1
+benchmark_iterations: 3
