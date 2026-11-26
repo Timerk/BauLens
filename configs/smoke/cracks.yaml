@@ -1,5 +1,6 @@
 seed: 42
-data_dir: data/smoke/cracks
+# Generated on demand by baulens.data.synthetic.make_synthetic_cracks (never committed).
+data_dir: artifacts/smoke/cracks-data
 artifacts_dir: artifacts/cracks/smoke
 architecture: resnet18
 image_size: 64

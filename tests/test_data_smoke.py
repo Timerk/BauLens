@@ -22,8 +22,10 @@ def test_load_concrete_fixture() -> None:
 def test_load_synthetic_cracks(tiny_crack_images: Path) -> None:
     config = load_config(Path("configs/smoke/cracks.yaml"), CracksConfig)
     assert not config.pretrained
+    # The smoke profile's data_dir is generated on demand; tests point it at the fixture.
+    config = config.model_copy(update={"data_dir": tiny_crack_images})
     for label in ("Positive", "Negative"):
-        files = sorted((tiny_crack_images / label).glob("*.jpg"))
+        files = sorted((config.data_dir / label).glob("*.jpg"))
         assert len(files) == 16
         with Image.open(files[0]) as image:
             assert image.mode == "RGB"
