@@ -162,8 +162,15 @@ def reliability(result: Calibration, paths: Sequence[Path], title: str) -> None:
         color=SERIES[0],
         marker="o",
         markersize=5,
-        label="model",
+        label="model (labels: images per bin)",
     )
+    counts = [
+        n for n, c in zip(result.counts, result.mean_confidence, strict=True) if c is not None
+    ]
+    for (x, y), count in zip(points, counts, strict=True):
+        ax.annotate(
+            str(count), (x, y), textcoords="offset points", xytext=(4, -10), fontsize=7, color=MUTED
+        )
     ax.set(
         xlabel="mean predicted P(crack)",
         ylabel="observed crack fraction",
@@ -171,7 +178,7 @@ def reliability(result: Calibration, paths: Sequence[Path], title: str) -> None:
         xlim=(0, 1),
         ylim=(0, 1),
     )
-    ax.legend(loc="upper left")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2, fontsize=8)
     save(figure, paths)
 
 
@@ -197,28 +204,30 @@ def gallery(
 
 
 def robustness(rows: Sequence[dict[str, Any]], paths: Sequence[Path]) -> None:
+    """Dot plot of recall and precision per corruption (zoomed axis; dots, not bars)."""
     frame = pd.DataFrame(rows)
-    figure, ax = plt.subplots(figsize=(7, 3.4))
+    figure, ax = plt.subplots(figsize=(7, 3.8))
     positions = np.arange(len(frame))
-    ax.barh(positions, frame["f1"], color=SERIES[0], height=0.6)
-    clean = frame.loc[frame["corruption"] == "none", "f1"]
-    if len(clean):
-        ax.axvline(float(clean.iloc[0]), color=MUTED, linewidth=1, linestyle="--")
+    ax.scatter(frame["recall"], positions, color=SERIES[0], s=36, label="recall", zorder=3)
+    ax.scatter(
+        frame["precision"],
+        positions,
+        color=SERIES[1],
+        s=36,
+        marker="D",
+        label="precision",
+        zorder=3,
+    )
     ax.set_yticks(positions, frame["corruption"])
     ax.invert_yaxis()
-    ax.set_xlim(0, 1.02)
-    ax.set_xlabel("F1 at the validation threshold (dashed: clean)")
-    ax.set_title("Robustness probe on a stratified test subset")
-    for position, value in zip(positions, frame["f1"], strict=True):
-        ax.text(
-            min(value + 0.01, 0.94),
-            float(position),
-            f"{value:.3f}",
-            va="center",
-            fontsize=7.5,
-            color=TEXT,
-        )
+    low = float(min(frame["recall"].min(), frame["precision"].min()))
+    ax.set_xlim(min(0.95, low - 0.02), 1.005)
+    ax.set_xlabel("at the validation-chosen threshold (note the zoomed axis)")
+    ax.set_title(
+        f"Corruption probe on a stratified test subset ({int(frame['images'].iloc[0])} images)"
+    )
     ax.grid(axis="y", visible=False)
+    ax.legend(loc="lower left")
     save(figure, paths)
 
 
