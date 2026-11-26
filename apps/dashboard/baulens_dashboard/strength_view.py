@@ -99,7 +99,9 @@ def render(client: ApiClient, model: StrengthModel | None) -> None:
             st.session_state["strength"] = client.predict_strength(submitted)
             st.session_state["mix"] = submitted
         except ApiError as error:
+            # Never show a previous prediction next to a mix it was not computed for.
             st.session_state.pop("strength", None)
+            st.session_state["mix"] = submitted
             left.error(f"Prognose fehlgeschlagen: {error.detail}")
     with right:
         _result(model)
@@ -113,6 +115,7 @@ def _result(model: StrengthModel) -> None:
         return
     mix = st.session_state["mix"]
     st.markdown("##### Prognose")
+    st.caption("Für die zuletzt übermittelte Rezeptur.")
     st.metric(
         "Druckfestigkeit (Modellschätzung)",
         f"{number(prediction['point_mpa'])} MPa",

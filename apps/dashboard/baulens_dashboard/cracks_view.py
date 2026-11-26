@@ -1,6 +1,7 @@
 """Crack image upload or example selection, probability against threshold, Grad-CAM."""
 
 import base64
+import hashlib
 from pathlib import Path
 
 import streamlit as st
@@ -45,6 +46,18 @@ def _choose_image() -> tuple[bytes, str, str] | None:
     return (EXAMPLES_DIR / choice).read_bytes(), choice, "image/jpeg"
 
 
+def image_key(chosen: tuple[bytes, str, str] | None) -> str | None:
+    if chosen is None:
+        return None
+    content, filename, content_type = chosen
+    return f"{hashlib.sha256(content).hexdigest()}:{filename}:{content_type}"
+
+
+def clear_crack_result() -> None:
+    for name in ("crack", "crack_key"):
+        st.session_state.pop(name, None)
+
+
 def render(client: ApiClient, model: CrackModel | None) -> None:
     if model is None:
         st.info(
@@ -56,23 +69,27 @@ def render(client: ApiClient, model: CrackModel | None) -> None:
     with left:
         st.markdown("##### Oberflächenbild")
         chosen = _choose_image()
-        element = st.text_input(
+        # Read live by the report tab; it is not sent to the classifier.
+        st.text_input(
             "Bauteil (optional, für den Bericht)",
             max_chars=120,
             placeholder="z. B. Stütze B2, Achse 4",
+            key="crack_element",
         )
         analyse = st.button("Bild analysieren", type="primary", disabled=chosen is None)
+    key = image_key(chosen)
+    if st.session_state.get("crack_key") != key:
+        # A result is only shown for the image it was computed from.
+        clear_crack_result()
     if analyse and chosen is not None:
         content, filename, content_type = chosen
         try:
             result = client.predict_cracks(content, filename, content_type, gradcam=True)
         except ApiError as error:
-            st.session_state.pop("crack", None)
             left.error(f"Analyse fehlgeschlagen: {error.detail}")
         else:
             st.session_state["crack"] = result
-            st.session_state["crack_image"] = content
-            st.session_state["crack_element"] = element.strip() or None
+            st.session_state["crack_key"] = key
     with right:
         _result(model)
 
@@ -98,8 +115,14 @@ def _result(model: CrackModel) -> None:
         f"Markierung: Entscheidungsschwelle {number(prediction['threshold'], 3)}, auf den "
         f"Validierungsdaten gewählt ({strategy})."
     )
+    # Both panels come from the API's EXIF-normalised image, so they share one orientation.
     original, overlay = st.columns(2)
-    original.image(st.session_state["crack_image"], caption="Original", width="stretch")
+    if analysis["preview_jpeg_base64"]:
+        original.image(
+            base64.b64decode(analysis["preview_jpeg_base64"]),
+            caption="Original (aufrecht, wie vom Modell gesehen)",
+            width="stretch",
+        )
     if analysis["gradcam_png_base64"]:
         overlay.image(
             base64.b64decode(analysis["gradcam_png_base64"]),

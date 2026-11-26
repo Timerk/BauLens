@@ -1,6 +1,7 @@
 """Inspection report: combine the current results, pick a source, show the checked draft."""
 
 import html
+import json
 from datetime import date
 from typing import Any
 
@@ -25,7 +26,8 @@ def inspection_input(case_id: str) -> dict[str, Any] | None:
         case["strength"] = st.session_state["strength"]
     if "crack" in st.session_state:
         analysis = st.session_state["crack"]
-        case["image"] = analysis["image"] | {"element": st.session_state.get("crack_element")}
+        element = (st.session_state.get("crack_element") or "").strip() or None
+        case["image"] = analysis["image"] | {"element": element}
         case["crack"] = analysis["prediction"]
     return case if len(case) > 1 else None
 
@@ -80,7 +82,17 @@ def render(client: ApiClient, status: ComponentStatus | None, llm_mode: str) -> 
             recorded = _recorded_case(client, status)
         elif source == "live":
             st.caption("Ein lokales 3-4B-Modell braucht auf einer CPU 30–70 s pro Bericht.")
-        payload = recorded["case"] if recorded is not None else case
+        # A replay can only serve a recorded case; the user's own results are never sent.
+        if source == "replay":
+            payload = recorded["case"] if recorded is not None else None
+        else:
+            payload = case
+        model = recorded["models"][0] if recorded is not None and recorded["models"] else None
+        key = json.dumps([payload, source, model], sort_keys=True, default=str)
+        if st.session_state.get("report_key") != key:
+            # A report is only shown for the exact inputs it was generated from.
+            st.session_state.pop("report", None)
+            st.session_state.pop("report_key", None)
         ready = status is not None and status["ready"]
         if not ready:
             st.info(
@@ -88,6 +100,8 @@ def render(client: ApiClient, status: ComponentStatus | None, llm_mode: str) -> 
                 "Die Eingaben, die übergeben würden, stehen unten.",
                 icon=":material/construction:",
             )
+        elif payload is None and source == "replay":
+            st.caption("Für Replay einen aufgezeichneten Fall wählen.")
         elif payload is None:
             st.caption("Zuerst eine Festigkeitsprognose oder einen Rissbefund erstellen.")
         create = st.button(
@@ -97,12 +111,11 @@ def render(client: ApiClient, status: ComponentStatus | None, llm_mode: str) -> 
             with st.expander("Übergebene Daten (InspectionInput)"):
                 st.json(payload)
     if create and payload is not None:
-        model = recorded["models"][0] if recorded is not None and recorded["models"] else None
         with right, st.spinner("Bericht wird erstellt …"):
             try:
                 st.session_state["report"] = client.report(payload, source, model)
+                st.session_state["report_key"] = key
             except ApiError as error:
-                st.session_state.pop("report", None)
                 right.error(f"Bericht fehlgeschlagen: {error.detail}")
     with right:
         _result()

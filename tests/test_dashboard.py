@@ -1,5 +1,7 @@
 """Dashboard tests: the HTTP client against httpx.MockTransport and the app via AppTest."""
 
+import base64
+import io
 import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -7,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from PIL import Image
 from streamlit.testing.v1 import AppTest
 
 from baulens_dashboard import client as client_module
@@ -117,7 +120,31 @@ REPORT = {
 Handler = Callable[[httpx.Request], httpx.Response]
 
 
-def api(report_ready: bool = False, llm_mode: str = "live") -> tuple[Handler, list[httpx.Request]]:
+def _tiny_image(fmt: str) -> str:
+    buffer = io.BytesIO()
+    Image.new("RGB", (4, 6), (120, 120, 120)).save(buffer, format=fmt)
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+CRACK_ANALYSIS = {
+    "prediction": {
+        "crack_probability": 0.99,
+        "threshold": 0.954,
+        "label": "crack",
+        "model_name": "resnet18",
+        "model_version": "c1",
+    },
+    "image": {"filename": "x.jpg", "width_px": 227, "height_px": 227, "sha256": "0" * 64},
+    "input_size_px": 128,
+    "preview_jpeg_base64": _tiny_image("JPEG"),
+    "gradcam_png_base64": _tiny_image("PNG"),
+}
+RECORDED = [{"case": {"case_id": "PB-001"}, "models": ["llama3.2:3b"]}]
+
+
+def api(
+    report_ready: bool = False, llm_mode: str = "live", recorded: list[Any] | None = None
+) -> tuple[Handler, list[httpx.Request]]:
     seen: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -126,8 +153,9 @@ def api(report_ready: bool = False, llm_mode: str = "live") -> tuple[Handler, li
             ("GET", "/api/v1/health"): (200, health(report_ready, llm_mode)),
             ("GET", "/api/v1/models"): (200, MODELS),
             ("POST", "/api/v1/strength/predict"): (200, PREDICTION),
+            ("POST", "/api/v1/cracks/predict"): (200, CRACK_ANALYSIS),
             ("GET", "/api/v1/report/cases"): (
-                (200, [{"case": {"case_id": "PB-001"}, "models": ["llama3.2:3b"]}])
+                (200, RECORDED if recorded is None else recorded)
                 if report_ready
                 else (503, {"detail": "report module not available"})
             ),
@@ -261,3 +289,48 @@ def test_app_explains_an_unreachable_api(monkeypatch: pytest.MonkeyPatch) -> Non
     assert not app.exception
     assert any("nicht erreichbar" in error.value for error in app.error)
     assert not app.tabs
+
+
+def _button(app: AppTest, label: str) -> Any:
+    return next(button for button in app.button if button.label == label)
+
+
+def _crack_badges(app: AppTest) -> list[str]:
+    return [m.value for m in app.markdown if "Riss erkannt" in m.value]
+
+
+def test_crack_result_is_cleared_when_the_image_changes(
+    mocked_api: Callable[..., list[httpx.Request]],
+) -> None:
+    seen = mocked_api()
+    app = _app().run()
+    _button(app, "Bild analysieren").click().run()
+    assert not app.exception
+    assert _crack_badges(app)
+    upload = next(r for r in seen if r.url.path == "/api/v1/cracks/predict")
+    assert upload.url.params["gradcam"] == "true"
+    app.selectbox(key="example").set_value("ohne_riss_00346.jpg").run()
+    assert not _crack_badges(app)
+    assert "Bild wählen und analysieren." in [c.value for c in app.caption]
+
+
+def test_report_is_cleared_when_its_inputs_change(
+    mocked_api: Callable[..., list[httpx.Request]],
+) -> None:
+    mocked_api(report_ready=True)
+    app = _app().run()
+    _button(app, "Festigkeit prognostizieren").click().run()
+    _button(app, "Bericht erstellen").click().run()
+    assert not app.exception
+    assert any("Prognose" in m.value for m in app.markdown if "bl-report" in m.value)
+    next(t for t in app.text_input if t.label == "Vorgangsnummer").set_value("PB-2").run()
+    assert "Noch kein Bericht erstellt." in [c.value for c in app.caption]
+
+
+def test_replay_requires_a_recorded_case(mocked_api: Callable[..., list[httpx.Request]]) -> None:
+    seen = mocked_api(report_ready=True, recorded=[])
+    app = _app().run()
+    _button(app, "Festigkeit prognostizieren").click().run()
+    app.radio[-1].set_value("replay").run()
+    assert _button(app, "Bericht erstellen").disabled
+    assert not any(r.url.path == "/api/v1/report" for r in seen)

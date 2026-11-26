@@ -103,6 +103,7 @@ class CrackAnalysis(TypedDict):
     prediction: CrackPrediction
     image: ImageMetadata
     input_size_px: int
+    preview_jpeg_base64: str | None
     gradcam_png_base64: str | None
 
 
