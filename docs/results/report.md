@@ -243,9 +243,11 @@ scored, not gated. This is the kind of error the disclaimer and the engineer's r
   stored drafts were re-scored with the final rules (`compare --resume` re-scores without model
   calls). No faithfulness rule changed between the first and the last case of the run.
 - Ollama reported a load time of 0 s for gemma3:4b because the model was already resident
-  from the failed attempt. The "peak runner RSS" of 0.04 GiB is not meaningful on this Windows
-  setup: the model weights are memory-mapped by a process psutil did not attribute to Ollama.
-  Use the `/api/ps` size (2.69 GiB for gemma3:4b with a 4096-token context) instead.
+  from the failed attempt. The "peak runner RSS" of 0.04 GiB for gemma3:4b is wrong: Ollama 0.40 runs
+  the model in its bundled `llama-server.exe`, which the monitor of this run did not count as
+  an Ollama process. The monitor now includes it (a spot check showed 2.4 GiB for
+  llama3.2:3b); until the comparison is re-run, use the `/api/ps` size (2.69 GiB for gemma3:4b
+  with a 4096-token context).
 - Re-run on an idle machine: `uv run baulens report compare`. It re-records the replies in
   `data/report_replays/`, rewrites the table above and the figure, and records all resource
   columns.

@@ -20,13 +20,20 @@ class LoadSummary(BaseModel):
     total_memory_bytes: int
 
 
+_RUNNER_NAMES = ("ollama", "llama-server", "llama_server")
+
+
 def _ollama_rss() -> int | None:
-    """RSS of the largest Ollama process; the model runner holds the weights."""
+    """RSS of the largest Ollama process.
+
+    The weights live in the model runner, which Ollama 0.40 starts as its bundled
+    ``llama-server`` (llama.cpp) rather than as an ``ollama`` process.
+    """
     peak: int | None = None
     for process in psutil.process_iter(["name", "memory_info"]):
         name = (process.info.get("name") or "").lower()
         memory = process.info.get("memory_info")
-        if "ollama" in name and memory is not None:
+        if any(runner in name for runner in _RUNNER_NAMES) and memory is not None:
             peak = max(peak or 0, int(memory.rss))
     return peak
 
