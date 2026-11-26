@@ -154,9 +154,9 @@ def _train(config: StrengthConfig, root: Path) -> TrainResult:
         ),
         "permutation_mae_mpa": permutation,
     }
-    with TemporaryDirectory(dir=root) as directory:
+    model_dir.mkdir(exist_ok=True)
+    with TemporaryDirectory(dir=model_dir, prefix=".staging-") as directory:
         staging = Path(directory)
-        (staging / "model").mkdir()
         joblib.dump(artifact, staging / MODEL_PATH, compress=3)
         fitted_id = sha256((staging / MODEL_PATH).read_bytes()).hexdigest()
         write_json(staging / METADATA_PATH, {**metadata, "fitted_artifact_sha256": fitted_id})
@@ -164,7 +164,7 @@ def _train(config: StrengthConfig, root: Path) -> TrainResult:
         pd.DataFrame([_fold_record(x) for x in grouped + naive]).assign(
             fitted_artifact_sha256=fitted_id
         ).to_csv(staging / CV_FOLDS_PATH, index=False)
-        publish_fit(staging, root)
+        publish_fit(staging, model_dir)
     return TrainResult(model_dir, winner.family, version, mae_by_candidate[winner])
 
 

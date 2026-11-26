@@ -64,12 +64,14 @@ def slice_errors(test: pd.DataFrame) -> tuple[list[ErrorSlice], list[ErrorSlice]
     )
 
 
-def worst_mixes(test: pd.DataFrame) -> list[dict[str, float]]:
+def worst_mixes(test: pd.DataFrame) -> list[dict[str, float | None]]:
     errors = test.assign(absolute_error=test["residual_mpa"].abs())
     worst_row = errors.sort_values("absolute_error", ascending=False, kind="stable")
     worst_row = worst_row.drop_duplicates("mix_id").head(5).copy()
     worst_row["measurements"] = worst_row["mix_id"].map(errors.groupby("mix_id").size())
-    worst_row["water_cement"] = worst_row["water"] / worst_row["cement"].replace(0, np.nan)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        ratios = worst_row["water"] / worst_row["cement"]
+    worst_row["water_cement"] = ratios.astype(object).where(np.isfinite(ratios), None)
     columns = [
         "mix_id",
         "measurements",
@@ -79,7 +81,7 @@ def worst_mixes(test: pd.DataFrame) -> list[dict[str, float]]:
         "predicted_mpa",
         "residual_mpa",
     ]
-    return cast(list[dict[str, float]], worst_row.loc[:, columns].to_dict(orient="records"))
+    return cast(list[dict[str, float | None]], worst_row.loc[:, columns].to_dict(orient="records"))
 
 
 def plot_residuals(test: pd.DataFrame, directory: Path) -> None:

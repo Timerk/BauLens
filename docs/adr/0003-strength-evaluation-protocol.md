@@ -66,8 +66,9 @@ whole mix, plus empirical age-specific coverage and mean width. [Conformal metho
 
 Test labels never guide features, model selection, tuning or interval calibration. Only the frozen
 winner scores the test partition, through `baulens strength evaluate`. Training stages the pipeline
-and diagnostics together and publishes their checksums in a manifest. Evaluation verifies them and
-uses the serialized fit's SHA-256 to identify holdout predictions. It scores each fitted artifact
+and diagnostics in an immutable generation with a checksum manifest, then atomically replaces the
+pointer to it. It retains the current and previous published generation. Evaluation verifies the files
+and uses the serialized fit's SHA-256 to identify holdout predictions. It scores each fitted artifact
 once and reuses its predictions when rebuilding reports. Feature permutation happens on
 grouped outer validation folds. SHAP plots use calibration inputs. Future changes informed by these
 holdout results require a fresh external holdout for another independent performance claim.

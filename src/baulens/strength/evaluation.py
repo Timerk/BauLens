@@ -13,6 +13,7 @@ from threadpoolctl import threadpool_limits  # type: ignore[import-untyped]
 from baulens.config import StrengthConfig
 from baulens.paths import project_path
 from baulens.strength.artifacts import (
+    CURRENT_PATH,
     CV_SUMMARY_PATH,
     FIT_FILES,
     METADATA_PATH,
@@ -48,8 +49,9 @@ class EvaluationResult:
 
 def evaluate(config: StrengthConfig) -> EvaluationResult:
     root = project_path(config.artifacts_dir)
-    if not (root / MODEL_PATH).is_file():
-        raise FileNotFoundError(f"Run strength train before evaluation. Expected {root / 'model'}")
+    model_dir = root / "model"
+    if not ((model_dir / CURRENT_PATH).is_file() or (model_dir / MODEL_PATH).is_file()):
+        raise FileNotFoundError(f"Run strength train before evaluation. Expected {model_dir}")
     with FileLock(str(root / ".strength.lock")), threadpool_limits(limits=config.threads):
         return _evaluate(config, root)
 

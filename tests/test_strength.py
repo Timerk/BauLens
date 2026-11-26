@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from shutil import copytree
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import pandas as pd
@@ -17,8 +18,18 @@ from baulens.config import StrengthConfig, load_config
 from baulens.paths import project_path
 from baulens.schemas import ConcreteMix, StrengthPrediction
 from baulens.strength import evaluate, train
-from baulens.strength.artifacts import CV_SUMMARY_PATH, FIT_FILES, MANIFEST_PATH
-from baulens.strength.features import RAW_FEATURES, MixFeatures
+from baulens.strength.artifacts import (
+    CURRENT_PATH,
+    CV_FOLDS_PATH,
+    CV_SUMMARY_PATH,
+    FIT_FILES,
+    MANIFEST_PATH,
+    METADATA_PATH,
+    MODEL_PATH,
+    publish_fit,
+    read_fit_files,
+)
+from baulens.strength.features import RAW_FEATURES, TARGET, MixFeatures
 from baulens.strength.inference import FittedStrength, StrengthPredictor
 from baulens.strength.metrics import bootstrap_metrics, conformal_radius
 from baulens.strength.modeling import Candidate
@@ -233,10 +244,15 @@ def test_predictor_rejects_overflowing_ratio_before_estimator(
 def test_failed_refit_preserves_old_bundle_and_mixed_sidecars_are_rejected(
     isolated_settings: StrengthConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = isolated_settings.artifacts_dir
     monkeypatch.setattr("baulens.strength.training.FAMILIES", ("Mean",))
     original = train(isolated_settings)
-    published = {name: (root / name).read_bytes() for name in (*FIT_FILES, MANIFEST_PATH)}
+    model_dir = original.model_dir
+    pointer = model_dir / CURRENT_PATH
+    original_pointer = pointer.read_bytes()
+    original_id = json.loads(original_pointer)["generations"][0]
+    generations = model_dir / "generations"
+    previous = generations / original_id
+    published = {name: (previous / name).read_bytes() for name in (*FIT_FILES, MANIFEST_PATH)}
     monkeypatch.setattr("baulens.strength.training.FAMILIES", ("Linear",))
 
     def failed_dump(artifact: FittedStrength, destination: Path, **kwargs: object) -> None:
@@ -249,16 +265,90 @@ def test_failed_refit_preserves_old_bundle_and_mixed_sidecars_are_rejected(
         patch.setattr("baulens.strength.training.joblib.dump", failed_dump)
         with pytest.raises(OSError, match="simulated joblib dump failure"):
             train(isolated_settings)
-    assert published == {name: (root / name).read_bytes() for name in published}
+    assert published == {name: (previous / name).read_bytes() for name in published}
+    assert pointer.read_bytes() == original_pointer
+
+    replace = Path.replace
+
+    def fail_pointer_switch(staged: Path, destination: Path) -> Path:
+        if destination == pointer.resolve():
+            new_id = json.loads(staged.read_bytes())["generations"][0]
+            new_fit = generations / new_id
+            assert (new_fit / MANIFEST_PATH).is_file()
+            assert (
+                FittedStrength.from_bytes((new_fit / MODEL_PATH).read_bytes()).candidate.family
+                == "Linear"
+            )
+            raise PermissionError("simulated pointer replacement failure")
+        return replace(staged, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", fail_pointer_switch)
+        with pytest.raises(PermissionError, match="simulated pointer replacement failure"):
+            train(isolated_settings)
+
+    assert pointer.read_bytes() == original_pointer
+    assert published == {name: (previous / name).read_bytes() for name in published}
+    assert {path.name for path in generations.iterdir()} == {original_id}
+    rows, _ = prepare_data(project_path(isolated_settings.data_path))
+    mix = ConcreteMix.model_validate(rows.loc[0, list(RAW_FEATURES)].to_dict())
+    assert StrengthPredictor.load(model_dir).predict(mix).model_name == "Mean"
     assert evaluate(isolated_settings).model_name == "Mean"
 
+    # Successful publications retain only the current and immediately previous fits.
+    train(isolated_settings)
+    current_id, last_id = json.loads(pointer.read_bytes())["generations"]
+    assert last_id == original_id
+    assert {path.name for path in generations.iterdir()} == {current_id, original_id}
+    assert StrengthPredictor.load(model_dir).predict(mix).model_name == "Linear"
+
+    with TemporaryDirectory(dir=model_dir) as directory:
+        staging = Path(directory)
+        for name, contents in read_fit_files(model_dir, FIT_FILES).items():
+            (staging / name).write_bytes(contents)
+        publish_fit(staging, model_dir)
+    next_id, last_id = json.loads(pointer.read_bytes())["generations"]
+    assert last_id == current_id
+    assert {path.name for path in generations.iterdir()} == {next_id, current_id}
+
     # Changing a sidecar with the same config/data version must fail closed.
-    cv_path = root / CV_SUMMARY_PATH
-    cv = json.loads(published[CV_SUMMARY_PATH])
-    cv["grouped"][0]["model"] = "Linear"
+    cv_path = generations / next_id / CV_SUMMARY_PATH
+    cv = json.loads(cv_path.read_bytes())
+    cv["grouped"][0]["model"] = "Mean"
     cv_path.write_text(json.dumps(cv), encoding="utf-8")
     with pytest.raises(ValueError, match="do not match the manifest"):
         evaluate(isolated_settings)
+
+
+def test_report_describes_unstratified_split_and_missing_overflow_ratio(
+    isolated_settings: StrengthConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = pd.read_csv(project_path(isolated_settings.data_path)).assign(**{TARGET: 30.0})
+    rows.loc[0, "cement"] = 1e-310
+    path = isolated_settings.artifacts_dir / "constant-strength.csv"
+    rows.to_csv(path, index=False)
+    frame, _ = prepare_data(path)
+    groups = mix_groups(frame)
+    settings = isolated_settings.model_copy(update={"data_path": path})
+    for seed in range(50):
+        settings = settings.model_copy(update={"seed": seed})
+        partitions = split_partitions(frame, groups, settings)
+        if 0 in partitions.test:
+            break
+    assert 0 in partitions.test and partitions.strength_bins == 1
+    monkeypatch.setattr("baulens.strength.training.FAMILIES", ("Mean",))
+    train(settings)
+    assert evaluate(settings).model_name == "Mean"
+
+    metrics = json.loads((settings.artifacts_dir / "test_metrics.json").read_bytes())
+    worst = metrics["worst"][0]
+    assert worst["mix_id"] == groups.iloc[0] and worst["water_cement"] is None
+    report = settings.results_path.read_text(encoding="utf-8")
+    assert "unstratified fallback" in report
+    assert "preserving the total" in report
+    assert "assumes exchangeability" in report
+    assert "outcome-stratified" not in report and "1 strata" not in report
+    assert f"| {worst['mix_id']} | {worst['measurements']} | {worst['age_days']} | — |" in report
 
 
 @pytest.mark.smoke
@@ -274,11 +364,13 @@ def test_strength_cli_smoke_and_predictor_round_trip(
         assert result.exit_code == 0, result.exception or result.output
 
     model_dir = tmp_path / "model"
-    assert (model_dir / "metadata.json").is_file()
+    current = json.loads((model_dir / CURRENT_PATH).read_bytes())["generations"][0]
+    generation = model_dir / "generations" / current
+    assert (generation / METADATA_PATH).is_file()
     assert (tmp_path / "test_metrics.json").is_file()
     assert len(list((tmp_path / "figures").glob("*.png"))) == 3
     assert "Random row" in settings.results_path.read_text(encoding="utf-8")
-    folds = pd.read_csv(tmp_path / "cv_folds.csv")
+    folds = pd.read_csv(generation / CV_FOLDS_PATH)
     assert len(folds[folds.protocol == "grouped"]) == 24
     assert (folds.loc[folds.protocol == "grouped", "overlapping_validation_rows"] == 0).all()
 

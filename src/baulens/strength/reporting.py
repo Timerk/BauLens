@@ -75,7 +75,7 @@ class EvaluationReport:
     covered_mixes: int
     near_mix_errors: list[ErrorSlice]
     stratum_counts: list[int]
-    worst: list[dict[str, float]]
+    worst: list[dict[str, float | None]]
     shap: list[ShapSummary]
     resamples: int
 
@@ -93,6 +93,16 @@ def render_results(
 ) -> str:
     figures = Path(relpath(figures_dir, results_path.parent)).as_posix()
     model = f"{metadata['model_name']} ({metadata['features'].lower()})"
+    bins = metadata["strength_bins"]
+    if bins > 1:
+        split = f"The test split used {bins} strata of mean strength per mix. "
+        exchangeability = (
+            "The outcome-stratified test split leaves exchangeability "
+            "with the calibration mixes unestablished."
+        )
+    else:
+        split = "Test mixes were sampled uniformly at random using an unstratified fallback. "
+        exchangeability = "The rank argument assumes exchangeability with the calibration mixes."
     title = (
         "# Concrete compressive strength\n\n"
         f"**{model}** (`{metadata['model_version']}`) achieved **{report.scores.mae:.2f} MPa MAE** "
@@ -101,14 +111,13 @@ def render_results(
         f"{report.covered_rows}/{report.overall.rows} measurements "
         f"({_fmt(report.overall.coverage, '.1%')}) and every measurement for "
         f"{report.covered_mixes}/{report.overall.mixes} mixes ({report.joint_coverage:.1%}). "
-        "These are empirical results. The outcome-stratified test split leaves exchangeability "
-        "with the calibration mixes unestablished.\n\n"
+        f"These are empirical results. {exchangeability}\n\n"
         "## Data and protocol\n\n"
         f"This run read {metadata['rows_before_deduplication']} measurements from the "
         "[UCI concrete strength data](https://doi.org/10.24432/C5PK67). It removed "
         f"{metadata['exact_duplicates_removed']} exact duplicate rows and kept distinct outcomes "
         "at the same mix and age. A mix is the exact tuple of its seven ingredients in kg/m³. "
-        f"The test split used {metadata['strength_bins']} strata of mean strength per mix. "
+        f"{split}"
         "Calibration mixes were randomly drawn from the remainder.\n\n"
         "| Partition | Rows | Mixes |\n| --- | ---: | ---: |\n"
         + "\n".join(
@@ -234,14 +243,24 @@ def _test_tables(report: EvaluationReport, metadata: ModelMetadata, figures: str
     calibration_mixes = metadata["partitions"]["calibration"]["mixes"]
     rank = conformal_rank(calibration_mixes, metadata["interval_coverage"])
     stratum_counts = ", ".join(map(str, report.stratum_counts))
+    if metadata["strength_bins"] > 1:
+        sampling = (
+            "complete test mixes with replacement within their original mean-strength strata, "
+            f"preserving the test mix count in each stratum ({stratum_counts}). "
+        )
+        rank_caveat = "and is unestablished with an outcome-stratified test split. "
+    else:
+        sampling = (
+            f"complete test mixes with replacement, preserving the total ({report.overall.mixes}). "
+        )
+        rank_caveat = "between test and calibration mixes. "
     return "\n".join(
         [
             "## Held-out exact ingredient tuples",
             "",
             f"95% percentile intervals use {report.resamples:,} bootstrap replicates. Each samples "
-            "complete test mixes with replacement within their original mean-strength strata, "
-            f"preserving the test mix count in each stratum ({stratum_counts}). Each replicate "
-            "weights measurements equally and describes holdout uncertainty for the frozen fit.",
+            f"{sampling}Each replicate weights measurements equally and describes holdout "
+            "uncertainty for the frozen fit.",
             "",
             "| Metric | Estimate | 95% group bootstrap CI |",
             "| --- | ---: | ---: |",
@@ -275,7 +294,7 @@ def _test_tables(report: EvaluationReport, metadata: ModelMetadata, figures: str
             f"{metadata['radius_mpa']:.2f} MPa. This corresponds to rank probability "
             f"{rank}/{calibration_mixes + 1} ({rank / (calibration_mixes + 1):.1%}) under "
             "mix-score exchangeability and no ties. Exchangeability is assumed for that argument "
-            "and is unestablished with an outcome-stratified test split. Empirical bucket coverage "
+            f"{rank_caveat}Empirical bucket coverage "
             "can vary in small samples. "
             "Positive bias means the model underpredicted the observed strength.",
             "",
@@ -310,8 +329,8 @@ def _test_tables(report: EvaluationReport, metadata: ModelMetadata, figures: str
             "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             *(
                 f"| {row['mix_id']:.0f} | {row['measurements']:.0f} | {row['age_days']:.0f} | "
-                f"{row['water_cement']:.2f} | {row[TARGET]:.2f} | {row['predicted_mpa']:.2f} | "
-                f"{row['residual_mpa']:+.2f} |"
+                f"{_fmt(row['water_cement'], '.2f')} | {row[TARGET]:.2f} | "
+                f"{row['predicted_mpa']:.2f} | {row['residual_mpa']:+.2f} |"
                 for row in report.worst
             ),
             "",

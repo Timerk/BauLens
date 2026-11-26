@@ -35,7 +35,6 @@ class FittedStrength:
 
     @classmethod
     def load(cls, model_dir: Path) -> FittedStrength:
-        # The manifest uses paths relative to the artifacts root, even when only model/ is shipped.
         files = read_fit_files(model_dir, (MODEL_PATH, METADATA_PATH))
         return cls.from_bytes(files[MODEL_PATH])
 

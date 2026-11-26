@@ -57,11 +57,11 @@ of a fitting tuple. Those 29 measurements had 4.48 MPa MAE. The other 64 tuples 
 ## Integration
 
 `uv run --locked baulens strength train --config configs/strength.yaml` produces
-`pipeline.joblib` (about 67 KiB), `metadata.json`, and `manifest.json` under
-`artifacts/strength/model/`. Ship all three files for inference. The manifest binds the files to the
-same fitted artifact and the loader verifies them. Use a trusted build with the same locked
-environment. Training needs the UCI workbook at the configured path, and inference can start as
-soon as training publishes the artifact.
+`artifacts/strength/model/current.json` and a generation under `model/generations/` containing the
+pipeline (about 67 KiB), metadata, CV diagnostics, and their checksum manifest. Ship the `model/`
+directory for inference. The loader follows the pointer and verifies the fitted files. Use a
+trusted build with the same locked environment. Training needs the UCI workbook at the configured
+path, and inference can start as soon as training publishes the artifact.
 
 ```python
 from pathlib import Path
