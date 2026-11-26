@@ -12,7 +12,11 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from baulens.api.models import API_PREFIX
-from baulens.api.observability import RequestIdMiddleware, request_id_var
+from baulens.api.observability import (
+    BodySizeLimitMiddleware,
+    RequestIdMiddleware,
+    request_id_var,
+)
 from baulens.api.report_service import ReportService, build_report_service
 from baulens.api.routes import router
 from baulens.api.services import load_cracks, load_strength
@@ -68,6 +72,8 @@ def create_app(
         allow_headers=["Content-Type", "X-Request-ID"],
         expose_headers=["X-Request-ID"],
     )
+    # Multipart framing adds a few hundred bytes; 64 KiB of headroom is generous.
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=config.max_upload_bytes + 64 * 1024)
     app.add_middleware(RequestIdMiddleware)
     _register_error_handlers(app)
     return app

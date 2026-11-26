@@ -1,10 +1,10 @@
 """Validate uploaded images before any model sees them.
 
-Checks, in order: declared content type, byte size (streamed, so an oversized body is never
-held in memory), Pillow's structural ``verify()``, the decoded format, the pixel count (a
-guard against decompression bombs that is checked from the header, before decoding) and
-finally a full decode. EXIF orientation is applied and the result converted to RGB, so the
-model sees the image the way a person would.
+Checks, in order: declared content type, byte size (the request body as a whole is capped
+earlier by :class:`~baulens.api.observability.BodySizeLimitMiddleware`), Pillow's structural
+``verify()``, the decoded format, the pixel count (a guard against decompression bombs,
+checked from the header before decoding) and finally a full decode. EXIF orientation is
+applied and the result converted to RGB, so the model sees the image as a person would.
 """
 
 import hashlib

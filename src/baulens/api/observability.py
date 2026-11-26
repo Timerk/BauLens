@@ -3,8 +3,7 @@
 Every request gets an id (a well-formed ``X-Request-ID`` from the client is kept, anything
 else is replaced) that is returned in the response header, attached to every log record
 emitted while the request runs, and included in error bodies. Access logs carry method,
-route path, status and duration only: no bodies, query strings, file names or client
-addresses.
+path, status and duration only: no bodies, query strings, file names or client addresses.
 """
 
 import json
@@ -79,16 +78,86 @@ class RequestIdMiddleware:
         try:
             await self.app(scope, receive, send_with_id)
         finally:
-            route = scope.get("route")
             access_logger.info(
                 "request",
                 extra={
                     "fields": {
                         "method": scope["method"],
-                        "path": getattr(route, "path", scope["path"]),
+                        "path": scope["path"],
                         "status": status,
                         "duration_ms": round((time.perf_counter() - started) * 1000, 1),
                     }
                 },
             )
             request_id_var.reset(token)
+
+
+class _BodyTooLargeError(Exception):
+    pass
+
+
+class BodySizeLimitMiddleware:
+    """Reject request bodies above ``max_bytes`` before the multipart parser spools them.
+
+    A declared ``Content-Length`` above the limit is refused at once; a body without one is
+    counted while it streams and cut off when it crosses the limit.
+    """
+
+    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = dict(scope["headers"]).get(b"content-length")
+        if declared is not None and declared.isdigit() and int(declared) > self.max_bytes:
+            await _send_413(send, self.max_bytes)
+            return
+        received = 0
+        too_large = False
+        replaced = False
+
+        async def counting_receive() -> Message:
+            nonlocal received, too_large
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    too_large = True
+                    raise _BodyTooLargeError
+            return message
+
+        async def guarded_send(message: Message) -> None:
+            # The body parser may turn our exception into its own 400; answer 413 instead.
+            nonlocal replaced
+            if too_large:
+                if not replaced and message["type"] == "http.response.start":
+                    replaced = True
+                    await _send_413(send, self.max_bytes)
+                return
+            await send(message)
+
+        try:
+            await self.app(scope, counting_receive, guarded_send)
+        except _BodyTooLargeError:
+            if not replaced:
+                await _send_413(send, self.max_bytes)
+
+
+async def _send_413(send: Send, max_bytes: int) -> None:
+    body = json.dumps(
+        {"detail": f"request body exceeds {max_bytes} bytes", "request_id": request_id_var.get()}
+    ).encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 413,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
