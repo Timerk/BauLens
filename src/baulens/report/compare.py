@@ -23,6 +23,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from baulens.config import ReportConfig
 from baulens.paths import project_path
 from baulens.report.clients import GenerationOptions, LLMClient, LLMError, OllamaClient
+from baulens.report.completeness import check_completeness
+from baulens.report.facts import build_facts
 from baulens.report.generate import generate_report, generate_template
 from baulens.report.metrics import (
     TEMPLATE_ROW,
@@ -187,19 +189,50 @@ def run_model(
     return metrics
 
 
-def resumable_metrics(run_dir: Path, model: str, cases: int) -> ModelMetrics | None:
-    """Metrics of a finished, error-free model in an earlier run directory, if any."""
+def rescore(
+    results: Sequence[ReportResult], cases: Sequence[InspectionInput]
+) -> list[ReportResult]:
+    """Recompute completeness of stored drafts with the current rules (no model calls)."""
+    by_id = {case.case_id: case for case in cases}
+    rescored = []
+    for result in results:
+        if result.candidate is not None and result.faithfulness is not None:
+            sheet = build_facts(by_id[result.case_id])
+            completeness = check_completeness(result.candidate, result.faithfulness, sheet)
+            result = result.model_copy(update={"completeness": completeness})
+        rescored.append(result)
+    return rescored
+
+
+def resumable_metrics(
+    run_dir: Path, model: str, cases: Sequence[InspectionInput]
+) -> ModelMetrics | None:
+    """Re-scored metrics of a finished, error-free model in an earlier run directory."""
     path = results_path(run_dir, model)
     if not path.exists():
         return None
     results = load_results(path)
-    if len(results) != cases or any(result.status == "error" for result in results):
+    if len(results) != len(cases) or any(result.status == "error" for result in results):
         return None
-    saved = metrics_path(run_dir, model)
-    if saved.exists():
-        return ModelMetrics.model_validate_json(saved.read_text(encoding="utf-8"))
-    # Results survived a crash but the resource samples did not.
-    return compute_metrics(model, results)
+    results = rescore(results, cases)
+    _write_results(path, results)
+    saved_path = metrics_path(run_dir, model)
+    saved = (
+        ModelMetrics.model_validate_json(saved_path.read_text(encoding="utf-8"))
+        if saved_path.exists()
+        else None
+    )
+    # Without a saved metrics file the results survived a crash but the resource samples
+    # did not.
+    metrics = compute_metrics(
+        model,
+        results,
+        load=saved.load if saved else None,
+        load_time_s=saved.load_time_s if saved else None,
+        loaded_size_bytes=saved.loaded_size_bytes if saved else None,
+    )
+    saved_path.write_text(metrics.model_dump_json(indent=2), encoding="utf-8")
+    return metrics
 
 
 def run_template(
@@ -273,7 +306,7 @@ def run_comparison(
     rows: list[ModelMetrics] = []
     resumed: list[str] = []
     for model in models or config.models:
-        previous = resumable_metrics(run_dir, model, len(cases)) if resume_dir else None
+        previous = resumable_metrics(run_dir, model, cases) if resume_dir else None
         if previous is not None:
             progress(f"{model}: reusing complete results from {run_dir}")
             rows.append(previous)

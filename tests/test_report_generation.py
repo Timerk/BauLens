@@ -234,3 +234,22 @@ def test_fake_client_rejects_missing_script() -> None:
     client.generate([], {}, options)
     with pytest.raises(LLMError):
         client.generate([], {}, options)
+
+
+@pytest.mark.parametrize(
+    ("sentence", "consistent"),
+    [
+        ("Die Prognose liegt außerhalb des Wertebereichs der Trainingsdaten.", False),
+        ("Die Prognose ist unsicher, wenn Eingaben außerhalb des Trainingsbereichs liegen.", True),
+        ("Die Eingaben liegen nicht außerhalb des Wertebereichs der Trainingsdaten.", True),
+        ("Die Eingaben liegen innerhalb des Wertebereichs der Trainingsdaten.", True),
+    ],
+)
+def test_in_domain_case_must_not_be_declared_out_of_domain(sentence: str, consistent: bool) -> None:
+    case = strength_case()
+    sheet = build_facts(case)
+    draft = template_draft(sheet).model_copy(update={"einschraenkungen": sentence})
+    report = InspectionReport(case_id=case.case_id, draft=draft, generator="fake")
+    result = check_completeness(report, check_sections(draft.sections(), sheet), sheet)
+    item = next(item for item in result.items if item.name == "no_false_domain_warning")
+    assert item.satisfied is consistent

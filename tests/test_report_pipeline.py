@@ -188,7 +188,7 @@ def test_compare_writes_results_replays_figure_and_doc(tmp_path: Path) -> None:
     assert (tmp_path / "figures" / "model_comparison.png").stat().st_size > 10_000
     text = doc.read_text(encoding="utf-8")
     assert "old" not in text and "| fake:1b | 3 |" in text
-    assert resumable_metrics(run_dir, "fake:1b", 3) == fake
+    assert resumable_metrics(run_dir, "fake:1b", cases) == fake
 
 
 @pytest.mark.smoke

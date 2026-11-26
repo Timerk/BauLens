@@ -21,6 +21,11 @@ _OUT_OF_DOMAIN = re.compile(
     r"|Trainingsbereich\w*\s+(\w+\s+){0,3}(verlassen|überschritten)|extrapol",
     re.IGNORECASE,
 )
+_HEDGE = re.compile(
+    r"\b(wenn|falls|sofern|soweit|möglicherweise|könnte|könnten|kann|können|nicht)\b",
+    re.IGNORECASE,
+)
+_SENTENCE = re.compile(r"(?<=[.!?])\s+")
 _ESTIMATE = re.compile(r"Schätzung|geschätzt|Prognose|prognostiziert|Modellwert", re.IGNORECASE)
 _TESTING = re.compile(
     r"12390-3|Druckfestigkeitsprüfung|Probekörper|Prüfkörper|Bohrkern", re.IGNORECASE
@@ -71,6 +76,21 @@ def check_completeness(
                     "out_of_domain_warning",
                     bool(_OUT_OF_DOMAIN.search(text)),
                     "Warnung: außerhalb des Trainingsbereichs",
+                )
+            )
+        else:
+            # Consistency, not presence: an in-domain case must not be declared out of domain.
+            # Conditional or negated sentences ("wenn Eingaben außerhalb ... liegen") pass.
+            false_claims = [
+                sentence
+                for sentence in _SENTENCE.split(text)
+                if _OUT_OF_DOMAIN.search(sentence) and not _HEDGE.search(sentence)
+            ]
+            items.append(
+                _item(
+                    "no_false_domain_warning",
+                    not false_claims,
+                    false_claims[0] if false_claims else "keine falsche Bereichswarnung",
                 )
             )
     if case.crack is not None:
