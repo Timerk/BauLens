@@ -1,0 +1,6 @@
+seed: 42
+data_path: tests/fixtures/concrete_sample.csv
+artifacts_dir: artifacts/strength/smoke
+test_fraction: 0.2
+cv_splits: 2
+cv_repeats: 1

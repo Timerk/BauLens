@@ -1,0 +1,7 @@
+seed: 42
+artifacts_dir: artifacts/report
+models:
+  - qwen2.5:3b
+  - llama3.2:3b
+temperature: 0.0
+max_tokens: 1024

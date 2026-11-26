@@ -1,0 +1,8 @@
+seed: 42
+data_dir: data/smoke/cracks
+artifacts_dir: artifacts/cracks/smoke
+architecture: resnet18
+image_size: 64
+batch_size: 8
+epochs: 1
+pretrained: false

@@ -1,0 +1,8 @@
+seed: 42
+data_dir: data/raw/cracks
+artifacts_dir: artifacts/cracks
+architecture: resnet18
+image_size: 224
+batch_size: 32
+epochs: 5
+pretrained: true
