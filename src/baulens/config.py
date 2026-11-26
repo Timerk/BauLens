@@ -1,10 +1,10 @@
 """Typed configuration for pipeline runs."""
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PositiveInt
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PositiveInt, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from baulens.paths import PROJECT_ROOT, project_path
@@ -31,12 +31,64 @@ class StrengthConfig(PipelineConfig):
 
 
 class CracksConfig(PipelineConfig):
+    """Crack classification run: data split, transfer learning, evaluation and export.
+
+    ``epochs`` is the maximum number of fine-tuning epochs after ``head_epochs`` epochs with
+    a frozen backbone; early stopping on validation loss usually ends training sooner.
+    """
+
     data_dir: Path
     architecture: Literal["resnet18", "efficientnet_b0"]
     image_size: PositiveInt
     batch_size: PositiveInt
     epochs: PositiveInt
     pretrained: bool
+
+    # Data split and leakage handling
+    val_fraction: float = Field(default=0.15, gt=0, lt=0.5)
+    test_fraction: float = Field(default=0.15, gt=0, lt=0.5)
+    near_duplicate_max_distance: int = Field(default=10, ge=0, le=32)
+    near_duplicate_min_correlation: float = Field(default=0.85, ge=-1, le=1)
+    train_fraction: float = Field(default=1.0, gt=0, le=1)
+
+    # Compute
+    device: Literal["auto", "cpu", "cuda"] = "auto"
+    num_threads: PositiveInt | None = None
+    num_workers: int = Field(default=0, ge=0)
+    eval_batch_size: PositiveInt = 128
+
+    # Optimisation
+    head_epochs: int = Field(default=2, ge=0)
+    finetune_blocks: int = Field(default=1, ge=0, le=4)
+    lr_head: float = Field(default=1e-3, gt=0)
+    lr_finetune: float = Field(default=2e-4, gt=0)
+    weight_decay: float = Field(default=1e-4, ge=0)
+    patience: PositiveInt = 2
+
+    # Augmentation
+    crop_scale_min: float = Field(default=0.6, gt=0, le=1)
+    color_jitter: float = Field(default=0.2, ge=0, lt=1)
+
+    # Evaluation
+    threshold_strategy: Literal["f1", "youden"] = "f1"
+    bootstrap_resamples: PositiveInt = 2000
+    calibration_bins: int = Field(default=15, ge=2)
+    robustness_max_images: PositiveInt = 2000
+    gallery_size: PositiveInt = 8
+    docs_figures_dir: Path | None = None
+
+    # Export and benchmark
+    onnx_opset: int = Field(default=18, ge=17)
+    parity_images: PositiveInt = 256
+    parity_tolerance: float = Field(default=1e-4, gt=0)
+    benchmark_warmup: int = Field(default=5, ge=0)
+    benchmark_iterations: PositiveInt = 50
+
+    @model_validator(mode="after")
+    def _splits_leave_training_data(self) -> Self:
+        if self.val_fraction + self.test_fraction >= 0.8:
+            raise ValueError("val_fraction + test_fraction must leave at least 20 % for training")
+        return self
 
 
 class ReportConfig(PipelineConfig):

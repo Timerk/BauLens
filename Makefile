@@ -34,6 +34,7 @@ cracks:
 	$(RUN) baulens cracks train
 	$(RUN) baulens cracks evaluate
 	$(RUN) baulens cracks export
+	$(RUN) baulens cracks benchmark
 
 report:
 	$(RUN) baulens report generate

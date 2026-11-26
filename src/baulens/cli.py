@@ -1,5 +1,8 @@
 """Command-line entry point for the BauLens pipelines."""
 
+import json
+import logging
+from dataclasses import asdict
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Never
@@ -7,7 +10,8 @@ from typing import Annotated, Never
 import typer
 from rich.console import Console
 
-from baulens.config import StrengthConfig, load_config
+from baulens.artifacts import ArtifactError
+from baulens.config import CracksConfig, StrengthConfig, load_config
 from baulens.data.download import DatasetError, DatasetName, download_dataset
 from baulens.paths import project_path
 
@@ -118,22 +122,93 @@ def strength_predict(
     typer.echo(result.model_dump_json(indent=2))
 
 
+CracksConfigOption = Annotated[
+    Path, typer.Option("--config", help="YAML settings validated by CracksConfig.")
+]
+DEFAULT_CRACKS_CONFIG = Path("configs/cracks.yaml")
+
+
+def _cracks_config(path: Path) -> CracksConfig:
+    logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
+    return load_config(path, CracksConfig)
+
+
+def _echo_json(payload: object) -> None:
+    typer.echo(json.dumps(payload, indent=2, default=str))
+
+
+@cracks_app.command("split")
+def cracks_split(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
+    """Index the images, check near-duplicates and write the group-aware split manifest."""
+    from baulens.cracks.splits import build_splits, split_files
+
+    settings = _cracks_config(config)
+    build_splits(settings)
+    _echo_json(json.loads(split_files(settings).leakage.read_text(encoding="utf-8")))
+
+
 @cracks_app.command("train")
-def cracks_train() -> None:
+def cracks_train(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
     """Train a concrete crack classifier."""
-    _pending(3)
+    from baulens.cracks.train import train
+
+    _echo_json(asdict(train(_cracks_config(config))))
 
 
 @cracks_app.command("evaluate")
-def cracks_evaluate() -> None:
+def cracks_evaluate(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
     """Evaluate the concrete crack classifier."""
-    _pending(3)
+    from baulens.cracks.evaluate import evaluate
+    from baulens.cracks.metadata import TrainingDataMismatchError
+
+    try:
+        result = asdict(evaluate(_cracks_config(config)))
+    except (TrainingDataMismatchError, ArtifactError) as error:
+        typer.echo(f"Evaluation refused: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _echo_json({key: value for key, value in result.items() if key != "robustness"})
 
 
 @cracks_app.command("export")
-def cracks_export() -> None:
+def cracks_export(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
     """Export the concrete crack classifier as ONNX."""
-    _pending(3)
+    from baulens.cracks.export import ExportError, export
+    from baulens.cracks.metadata import TrainingDataMismatchError
+
+    try:
+        result = export(_cracks_config(config))
+    except (ExportError, TrainingDataMismatchError, ArtifactError) as error:
+        typer.echo(f"Export error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _echo_json(asdict(result))
+
+
+@cracks_app.command("migrate")
+def cracks_migrate(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
+    """Publish a pre-generation checkpoint after verifying its provenance (one-off)."""
+    from baulens.cracks.metadata import LegacyMigrationError, TrainingDataMismatchError
+    from baulens.cracks.migrate import migrate_legacy
+
+    try:
+        record = migrate_legacy(_cracks_config(config))
+    except (LegacyMigrationError, TrainingDataMismatchError) as error:
+        typer.echo(f"Migration refused: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _echo_json(record)
+
+
+@cracks_app.command("benchmark")
+def cracks_benchmark(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
+    """Benchmark CPU inference latency of PyTorch and ONNX Runtime."""
+    from baulens.cracks.benchmark import benchmark
+    from baulens.cracks.metadata import TrainingDataMismatchError
+
+    try:
+        result = benchmark(_cracks_config(config))
+    except (TrainingDataMismatchError, ArtifactError) as error:
+        typer.echo(f"Benchmark refused: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _echo_json(asdict(result))
 
 
 @report_app.command("generate")
