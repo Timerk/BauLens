@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := all
-.PHONY: setup lint typecheck test smoke data strength cracks report all
+.PHONY: setup lint typecheck test smoke data strength cracks report api dashboard all
 
 UV ?= uv
 RUN := $(UV) run --locked
@@ -39,3 +39,9 @@ cracks:
 report:
 	$(RUN) baulens report generate
 	$(RUN) baulens report compare
+
+api:
+	$(RUN) baulens api serve
+
+dashboard:
+	cd apps/dashboard && $(RUN) streamlit run app.py
