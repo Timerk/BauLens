@@ -1,0 +1,6 @@
+seed: 42
+artifacts_dir: artifacts/report/smoke
+models:
+  - qwen2.5:3b
+temperature: 0.0
+max_tokens: 64

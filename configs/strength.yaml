@@ -1,0 +1,6 @@
+seed: 42
+data_path: data/raw/concrete/Concrete_Data.xls
+artifacts_dir: artifacts/strength
+test_fraction: 0.2
+cv_splits: 5
+cv_repeats: 3

@@ -1,0 +1,100 @@
+[project]
+name = "baulens"
+version = "0.1.0"
+description = "Machine learning pipelines for construction material inspection."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "fastapi>=0.115",
+    "filelock>=3.16",
+    "httpx>=0.28",
+    "lightgbm>=4.6",
+    "matplotlib>=3.9",
+    "numpy>=1.26.4",
+    "onnx>=1.17",
+    "onnxruntime>=1.20",
+    "onnxscript>=0.3",
+    "pandas>=2.2.3",
+    "pillow>=11",
+    "psutil>=6.1",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "python-calamine>=0.4",
+    "python-multipart>=0.0.18",
+    "pyyaml>=6.0.2",
+    "rich>=13.9",
+    "scikit-learn>=1.6",
+    "scipy>=1.14.1",
+    "seaborn>=0.13.2",
+    "shap>=0.47",
+    "streamlit>=1.41",
+    "torch>=2.6",
+    "torchvision>=0.21",
+    "typer>=0.15",
+    "uvicorn[standard]>=0.34",
+]
+
+[project.scripts]
+baulens = "baulens.cli:app"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29",
+    "jupyter>=1.1",
+    "mypy>=1.14",
+    "nbconvert>=7.16",
+    "pandas-stubs>=2.2.3",
+    "pre-commit>=4.1",
+    "pytest>=8.3",
+    "pytest-cov>=6",
+    "ruff>=0.11.5",
+    "types-pyyaml>=6.0.12",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
+torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-include = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "N", "RUF", "PTH"]
+
+[tool.mypy]
+files = ["src/baulens"]
+python_version = "3.12"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-config --strict-markers"
+markers = [
+    "slow: exercises computationally expensive paths",
+    "smoke: exercises the pipeline with miniature local data",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["baulens"]
+
+[tool.coverage.report]
+show_missing = true
