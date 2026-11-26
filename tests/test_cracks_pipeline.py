@@ -57,8 +57,9 @@ def test_split_is_grouped_and_complete(smoke_run: SmokeRun) -> None:
     assert leakage["images"] == 32
     manifest = (smoke_run.root / "splits" / "manifest.csv").read_text(encoding="utf-8")
     assert manifest.count("\n") == 33
-    for row in leakage["sensitivity"]:  # type: ignore[attr-defined]
-        assert row["cross_split_pairs_grouped"] == 0 or row["max_distance"] > 4
+    confirmed = leakage["confirmed"]
+    assert confirmed["cross_split_pairs_grouped"] == 0  # type: ignore[index]
+    assert set(leakage["split_counts"]) == {"train", "val", "test"}  # type: ignore[arg-type]
 
 
 @pytest.mark.smoke
