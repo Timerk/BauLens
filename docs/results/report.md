@@ -7,8 +7,8 @@ This page describes the setup, the metrics and the comparison of three small mod
 The architecture decision is in [ADR 0004](../adr/0004-llm-pipeline.md).
 
 > **Measured under shared load.** The comparison ran on a laptop CPU while other jobs were
-> training models on the same machine. Latencies are pessimistic and the Ollama server ran out
-> of memory once (see [Run notes](#run-notes)). Re-run everything on an idle machine with
+> training models on the same machine. Latencies are pessimistic, and the Ollama server stopped
+> once, most likely from memory pressure (see [Run notes](#run-notes)). Re-run everything on an idle machine with
 > `uv run baulens report compare`; the command rewrites the table below, the figure and the
 > replay files.
 
