@@ -132,6 +132,7 @@ def train(config: CracksConfig) -> TrainResult:
     epochs without improvement.
     """
     started = time.perf_counter()
+    git_sha, git_dirty = git_revision()  # the code that trains, not the HEAD at the end
     device = configure_runtime(config)
     paths = run_paths(config)
     paths.model_dir.mkdir(parents=True, exist_ok=True)
@@ -236,7 +237,6 @@ def train(config: CracksConfig) -> TrainResult:
         device=str(device),
         threads=torch.get_num_threads(),
     )
-    git_sha, git_dirty = git_revision()
     created = datetime.now(UTC)
     training: dict[str, Any] = asdict(result) | {
         "parameters": count_parameters(model),

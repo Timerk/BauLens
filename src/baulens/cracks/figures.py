@@ -72,33 +72,48 @@ def save(figure: Figure, paths: Sequence[Path]) -> None:
 
 
 def learning_curves(history: pd.DataFrame, best_epoch: int, paths: Sequence[Path]) -> None:
-    figure, (loss_ax, f1_ax) = plt.subplots(1, 2, figsize=(8, 3))
-    for ax, column, title in ((loss_ax, "loss", "BCE loss"), (f1_ax, "f1", "F1 at 0.5")):
-        if column == "loss":
-            ax.plot(history["epoch"], history["train_loss"], color=SERIES[0], label="train")
-        else:
-            ax.plot(
-                history["epoch"],
-                history["train_accuracy"],
-                color=SERIES[0],
-                label="train accuracy",
-                linestyle="--",
-            )
-        ax.plot(
-            history["epoch"],
-            history[f"val_{column}"],
-            color=SERIES[1],
-            marker="o",
-            markersize=4,
-            label="validation",
-        )
+    figure, (loss_ax, f1_ax) = plt.subplots(1, 2, figsize=(8, 3.2))
+    loss_ax.plot(history["epoch"], history["train_loss"], color=SERIES[0], label="train")
+    loss_ax.plot(
+        history["epoch"],
+        history["val_loss"],
+        color=SERIES[1],
+        marker="o",
+        markersize=4,
+        label="validation",
+    )
+    loss_ax.set_title("BCE loss")
+    f1_ax.plot(
+        history["epoch"],
+        history["train_accuracy"],
+        color=SERIES[0],
+        linestyle="--",
+        label="train accuracy",
+    )
+    f1_ax.plot(
+        history["epoch"],
+        history["val_f1"],
+        color=SERIES[1],
+        marker="o",
+        markersize=4,
+        label="validation F1",
+    )
+    f1_ax.set_title("Accuracy / F1 at threshold 0.5")
+    heads = history.loc[history["phase"] == "head", "epoch"]
+    for ax in (loss_ax, f1_ax):
         ax.axvline(best_epoch, color=MUTED, linewidth=1, linestyle=":")
-        heads = history.loc[history["phase"] == "head", "epoch"]
         if len(heads):
             ax.axvspan(0.5, heads.max() + 0.5, color=GRID, alpha=0.6, linewidth=0)
-        ax.set_title(title)
-        ax.set_xlabel("epoch (shaded: frozen backbone; dotted: restored checkpoint)")
+        ax.set_xlabel("epoch")
         ax.legend()
+    figure.text(
+        0.5,
+        -0.04,
+        "shaded: frozen backbone (head only); dotted: restored best checkpoint",
+        ha="center",
+        color=MUTED,
+        fontsize=8,
+    )
     save(figure, paths)
 
 
@@ -221,7 +236,8 @@ def leakage(
     hist_ax = figure.add_subplot(grid[0, :])
     hist_ax.hist(correlations, bins=60, range=(-0.2, 1.0), color=SERIES[0])
     hist_ax.axvline(threshold, color=TEXT, linewidth=1, linestyle="--")
-    hist_ax.set_yscale("log")
+    if len(correlations):
+        hist_ax.set_yscale("log")
     hist_ax.set(
         xlabel=f"Pearson r of 32x32 grey thumbnails (dashed: duplicate threshold {threshold:g})",
         ylabel="image pairs",
