@@ -16,7 +16,7 @@ from baulens.config import CracksConfig, ReportConfig, Settings, StrengthConfig,
 from baulens.data.download import DatasetError, DatasetName, download_dataset
 from baulens.paths import project_path
 from baulens.report.cases import CASES_SEED, generate_cases, load_cases, save_cases
-from baulens.report.clients import OllamaClient
+from baulens.report.clients import LLMClient, OllamaClient
 from baulens.report.compare import run_comparison
 from baulens.report.facts import build_facts
 from baulens.report.faithfulness import check_text
@@ -217,6 +217,11 @@ def cracks_benchmark(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None
     _echo_json(asdict(result))
 
 
+class CompareSource(StrEnum):
+    LIVE = "live"
+    REPLAY = "replay"
+
+
 class ReportMode(StrEnum):
     LIVE = "live"
     REPLAY = "replay"
@@ -336,33 +341,49 @@ def report_compare(
     update_docs: Annotated[
         bool, typer.Option("--docs/--no-docs", help="Rewrite the table and figure in docs/.")
     ] = True,
+    source: Annotated[
+        CompareSource,
+        typer.Option(help="live: query Ollama; replay: re-score the recorded replies offline."),
+    ] = CompareSource.LIVE,
+    resume: Annotated[
+        Path | None,
+        typer.Option(help="Earlier run directory; reuse its complete models.", file_okay=False),
+    ] = None,
 ) -> None:
-    """Compare the configured local models on all evaluation cases (needs a running Ollama)."""
+    """Compare the configured local models on all evaluation cases."""
     config = load_config(config_path, ReportConfig)
     if not update_docs:
         config = config.model_copy(update={"results_doc": None, "figures_dir": None})
     host = str(Settings().ollama_host)
     cases = load_cases(project_path(config.cases_path))[:limit]
     console = Console()
+    replay_dir = project_path(config.replay_dir)
 
-    def factory(model: str) -> OllamaClient:
+    def live(model: str) -> LLMClient:
         return OllamaClient(
             host, model, timeout_s=config.request_timeout_s, keep_alive=config.keep_alive
         )
 
-    probe = factory(config.models[0])
-    version = probe.version()
-    probe.close()
-    if version is None:
-        typer.echo(f"Ollama is not reachable at {host}", err=True)
-        raise typer.Exit(code=1)
+    def replayed(model: str) -> LLMClient:
+        return ReplayClient.from_directory(replay_dir, model)
+
+    version: str | None = None
+    if source is CompareSource.LIVE:
+        probe = OllamaClient(host, config.models[0])
+        version = probe.version()
+        probe.close()
+        if version is None:
+            typer.echo(f"Ollama is not reachable at {host}", err=True)
+            raise typer.Exit(code=1)
     run = run_comparison(
         config,
         cases,
         models=models,
-        client_factory=factory,
+        client_factory=live if source is CompareSource.LIVE else replayed,
         ollama_version=version,
-        record_replays=record_replays,
+        record_replays=record_replays and source is CompareSource.LIVE,
+        source=source.value,
+        resume_dir=project_path(resume) if resume is not None else None,
         progress=lambda line: _say(console, line),
     )
     _say(console, metrics_table(run.metrics))
