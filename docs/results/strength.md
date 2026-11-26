@@ -1,6 +1,6 @@
 # Concrete compressive strength
 
-**Histogram GBM (raw + engineered)** (`9a6c8beadf10`) achieved **3.83 MPa MAE** on 86 unseen mix designs. The 90% prediction intervals covered 95.7% of measurements and 93.0% of entire mixes.
+**Histogram GBM (raw + engineered)** (`9a6c8beadf10`) achieved **3.83 MPa MAE** on 86 unseen exact ingredient tuples. With a nominal 90% joint per-mix coverage target, the intervals covered 180/188 measurements (95.7%) and every measurement for 80/86 mixes (93.0%). These are empirical results. The outcome-stratified test split leaves exchangeability with the calibration mixes unestablished.
 
 ## Data and protocol
 
@@ -58,28 +58,37 @@ Engineered minus raw MAE (MPa, lower is better) for each family.
 
 The comparison uses the selected family and feature set, the same development rows, fold counts, seeds and tuning grid, and row splits at both CV levels.
 
-| Protocol | MAE (MPa) | RMSE (MPa) | R² |
-| --- | ---: | ---: | ---: |
-| Grouped | 4.30 ± 0.64 [4.04, 4.56] | 6.10 ± 1.03 [5.51, 6.70] | 0.86 ± 0.06 [0.83, 0.88] |
-| Random row | 3.22 ± 0.34 [3.03, 3.40] | 4.84 ± 0.70 [4.57, 5.11] | 0.91 ± 0.02 [0.90, 0.93] |
+| Protocol | Equal-fold MAE (MPa) | RMSE (MPa) | R² | Pooled OOF MAE (MPa) |
+| --- | ---: | ---: | ---: | ---: |
+| Grouped | 4.30 ± 0.64 [4.04, 4.56] | 6.10 ± 1.03 [5.51, 6.70] | 0.86 ± 0.06 [0.83, 0.88] | 4.34 |
+| Random row | 3.22 ± 0.34 [3.03, 3.40] | 4.84 ± 0.70 [4.57, 5.11] | 0.91 ± 0.02 [0.90, 0.93] | 3.22 |
 
-In random-row CV, 74.9% of validation rows shared their mix design with a fitting row. Grouped minus random-row MAE was +1.09 MPa. The grouped score estimates error for an unseen formulation.
+In random-row CV, 74.9% of validation rows shared their mix design with a fitting row. Grouped minus random-row MAE was +1.09 MPa. Pooled out-of-fold (OOF) MAE weights validation predictions equally across folds and repeats. Fold sizes differ, so this comparison describes the split-protocol difference for the selected model and feature set.
 
-## Held-out mix designs
+## Held-out exact ingredient tuples
 
-95% percentile intervals use 2,000 bootstrap replicates. Each samples complete test mixes with replacement and weights all measurements equally. The bootstrap describes holdout uncertainty for the frozen fit.
+95% percentile intervals use 2,000 bootstrap replicates. Each samples complete test mixes with replacement within their original mean-strength strata, preserving the test mix count in each stratum (18, 17, 17, 17, 17). Each replicate weights measurements equally and describes holdout uncertainty for the frozen fit.
 
 | Metric | Estimate | 95% group bootstrap CI |
 | --- | ---: | ---: |
-| MAE (MPa) | 3.827 | [3.001, 4.682] |
-| RMSE (MPa) | 5.166 | [4.056, 6.212] |
-| R² | 0.895 | [0.864, 0.923] |
+| MAE (MPa) | 3.827 | [3.049, 4.614] |
+| RMSE (MPa) | 5.166 | [4.117, 6.119] |
+| R² | 0.895 | [0.868, 0.922] |
 
-![Residuals versus predicted strength on unseen mixes](../figures/strength/residuals.png)
+![Residuals versus prediction on held-out tuples](../figures/strength/residuals.png)
+
+### Sensitivity to nearby fitting tuples
+
+A fitting tuple is nearby if each ingredient differs by at most 0.5 kg/m³. Age and strength are excluded. This audit uses the same frozen test predictions. The counts quantify similarity in ingredients. The workbook omits batch IDs, so the slice MAEs are descriptive.
+
+| Test subset | Measurements | Exact tuples | MAE (MPa) |
+| --- | ---: | ---: | ---: |
+| With a nearby fitting tuple | 29 | 22 | 4.48 |
+| Without a nearby fitting tuple | 159 | 64 | 3.71 |
 
 ### Error and coverage by age
 
-Split conformal uses one maximum absolute residual per calibration mix. The finite-sample order statistic gave a radius of 10.86 MPa. The same radius applies to each prediction. With exchangeable mixes, this construction targets joint coverage across the measured ages of a new mix. Strength stratification and source shift can affect exchangeability. Empirical bucket coverage can vary in small samples. Every measurement was covered in 93.0% of test mixes. Positive bias means the model underpredicted the observed strength.
+Split conformal uses one maximum absolute residual per calibration mix. The score at rank 79 of 86 gave a fixed radius of 10.86 MPa. This corresponds to rank probability 79/87 (90.8%) under mix-score exchangeability and no ties. Exchangeability is assumed for that argument and is unestablished with an outcome-stratified test split. Empirical bucket coverage can vary in small samples. Positive bias means the model underpredicted the observed strength.
 
 | Age (days) | Rows | Mixes | MAE (MPa) | Bias (MPa) | Coverage | Mean width (MPa) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -148,4 +157,4 @@ uv run --locked baulens strength train --config configs/strength.yaml
 uv run --locked baulens strength evaluate --config configs/strength.yaml
 ```
 
-Training took 177.2 s on a CPU under shared load. The local `artifacts/strength/` directory contains every fold score, test prediction, and a machine-readable copy of the metrics. Evaluation reuses cached predictions for the identical fitted model.
+Training took 1292.4 s on a CPU under shared load. The local `artifacts/strength/` directory contains every fold score, test prediction, and a machine-readable copy of the metrics. Evaluation verifies the fit manifest and reuses cached predictions for the identical serialized artifact. The fitted artifact SHA-256 for this report is `8751c1f3e02bb211d345f8944b32794a4bee839cbd613e6cf32f7d9178f95242`.

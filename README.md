@@ -42,7 +42,7 @@ for module and output conventions.
 ### Strength
 
 Run `make strength` after obtaining the concrete workbook. The [strength results](docs/results/strength.md)
-cover unseen mix designs, the random-row leakage comparison, and prediction intervals. See the
+cover unseen exact ingredient tuples, the random-row comparison, and prediction intervals. See the
 [model card](docs/model_cards/strength.md) for intended use and the inference interface.
 
 ### Datasets

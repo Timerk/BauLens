@@ -5,7 +5,10 @@
 Histogram gradient boosting regression, scikit-learn. Model `9a6c8beadf10` uses the eight raw
 inputs plus eight engineered features. The final fit used 616 measurements across 256 exact mix
 designs. A separate 201 measurements across 86 mixes supplied split-conformal calibration. The
-90% intervals have a fixed half-width of 10.86 MPa for this artifact. See the
+nominal 90% target is joint across a mix's measurements, with one maximum absolute residual
+per calibration mix. The 79th of 86 calibration scores gives a fixed half-width of 10.86 MPa
+and a rank probability of 79/87 (90.8%) under exchangeability with no ties. The holdout uses
+strata based on observed mean strength, so exchangeability with calibration is unestablished. See the
 [evaluation protocol](../adr/0003-strength-evaluation-protocol.md) for the split and selection.
 
 The dataset is I-Cheng Yeh's Concrete Compressive Strength workbook from UCI, licensed CC BY
@@ -33,26 +36,32 @@ outputs. Measure external performance before applying the model in a different s
 
 ## Evaluation
 
-| Metric | Result on 188 measurements from 86 unseen mixes |
+| Metric | Result on 188 measurements from 86 unseen exact ingredient tuples |
 | --- | ---: |
-| MAE (MPa) | 3.83 (95% group bootstrap CI 3.00–4.68) |
-| RMSE (MPa) | 5.17 (4.06–6.21) |
-| R² | 0.895 (0.864–0.923) |
-| Coverage per measurement | 95.7% |
-| Coverage for every measurement of a mix | 93.0% |
+| MAE (MPa) | 3.83 (95% stratified mix bootstrap CI 3.05–4.61) |
+| RMSE (MPa) | 5.17 (4.12–6.12) |
+| R² | 0.895 (0.868–0.922) |
+| Empirical coverage per measurement | 180/188 (95.7%) |
+| Empirical joint coverage per mix | 80/86 (93.0%) |
 | Mean interval width (MPa) | 21.71 |
 
 MAE rose to 7.24 MPa at observed strengths of 60 MPa and above, with a mean underprediction of
 7.24 MPa. That slice contains 11 measurements from four mixes. At ages 1–7 days, the MAE was
 4.59 MPa and coverage was 91.1%. See the [full results](../results/strength.md) for the random-row
-leakage comparison, group bootstrap intervals, and error slices.
+leakage comparison, stratified whole-mix bootstrap intervals, and error slices.
+
+In the tolerance sensitivity analysis, 22 test tuples were within 0.5 kg/m³ per ingredient
+of a fitting tuple. Those 29 measurements had 4.48 MPa MAE. The other 64 tuples had
+3.71 MPa MAE over 159 measurements. Batch provenance is unknown.
 
 ## Integration
 
 `uv run --locked baulens strength train --config configs/strength.yaml` produces
-`artifacts/strength/model/pipeline.joblib` (about 67 KiB) and `metadata.json`. The build needs
-the UCI workbook at the configured path. It does not need test evaluation to make a usable model.
-Load joblib files from a trusted build with the same locked environment.
+`pipeline.joblib` (about 67 KiB), `metadata.json`, and `manifest.json` under
+`artifacts/strength/model/`. Ship all three files for inference. The manifest binds the files to the
+same fitted artifact and the loader verifies them. Use a trusted build with the same locked
+environment. Training needs the UCI workbook at the configured path, and inference can start as
+soon as training publishes the artifact.
 
 ```python
 from pathlib import Path
@@ -65,6 +74,6 @@ predictor = StrengthPredictor.load(Path("artifacts/strength/model"))
 
 Load once at service startup and reuse for predictions. `predict` returns a `StrengthPrediction`
 with the point estimate, interval, input-range flag, five signed SHAP contributions in MPa ordered by
-absolute magnitude, model name, and version. On the Windows CPU laptop under shared load, the
-initial imports took about 5.0 s, `load` including first-time SHAP import took 1.8 s, and median
-warm latency was 22 ms over 30 single-mix calls. Full training took 177 s under shared load.
+absolute magnitude, model name, and version. In the initial Windows CPU benchmark, imports took
+about 5.0 s, `load` including first-time SHAP import took 1.8 s, and median warm latency was 22 ms
+over 30 single-mix calls. The full review rerun took 21.5 min under shared CPU load.
