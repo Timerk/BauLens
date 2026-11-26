@@ -39,8 +39,15 @@ campus buildings at METU (Ankara). All patches have the same size and similar li
 
 ## Evaluation
 
-See [docs/results/cracks.md](../results/cracks.md) for test metrics with 95 % bootstrap intervals,
-calibration, the corruption probe and the error gallery. Test performance is near the ceiling, as
+Test split, 6,000 images, threshold 0.954 chosen on validation (95 % bootstrap CI in brackets):
+
+| Precision | Recall | F1 | ROC-AUC | ECE |
+| --- | --- | --- | --- | --- |
+| 0.9993 [0.9983, 1.0] | 0.9987 [0.9973, 0.9997] | 0.9990 [0.9981, 0.9997] | 0.999997 | 0.0012 |
+
+Under synthetic low contrast (× 0.3), recall drops to 0.84, and under over-exposure (× 1.5) to
+0.97; precision stays at 1.0. See [docs/results/cracks.md](../results/cracks.md) for the
+calibration, the full corruption probe, the error gallery and the ONNX/CPU benchmark. Test performance is near the ceiling, as
 is usual for this dataset. **It measures in-distribution performance on one homogeneous,
 single-source lab-like dataset and says little about field performance.**
 
