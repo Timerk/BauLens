@@ -113,3 +113,30 @@ def test_download_rejects_wrong_hash_for_manual_archive(
         pytest.raises(DatasetError, match="SHA-256 mismatch"),
     ):
         download_dataset("concrete", raw_dir=raw_dir, manifest_path=manifest, client=client)
+
+
+def test_download_repairs_damaged_file_not_listed_in_manifest(
+    tmp_path: Path, archive_and_manifest: tuple[bytes, Path]
+) -> None:
+    """Files without a pinned hash (e.g. 40k crack JPEGs) are checked via the extraction record."""
+    _, manifest = archive_and_manifest
+    buffer = BytesIO()
+    with ZipFile(buffer, mode="w") as zip_file:
+        zip_file.writestr("sample.txt", PAYLOAD)
+        zip_file.writestr("images/00001.jpg", b"jpeg bytes")
+    archive = buffer.getvalue()
+    spec = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    spec["concrete"]["sha256"] = sha256(archive).hexdigest()
+    manifest.write_text(yaml.safe_dump(spec), encoding="utf-8")
+
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, content=archive))
+    raw_dir = tmp_path / "raw"
+    with httpx.Client(transport=transport) as client:
+        directory = download_dataset(
+            "concrete", raw_dir=raw_dir, manifest_path=manifest, client=client
+        )
+        image = directory / "images" / "00001.jpg"
+        image.write_bytes(b"")
+        download_dataset("concrete", raw_dir=raw_dir, manifest_path=manifest, client=client)
+
+    assert image.read_bytes() == b"jpeg bytes"

@@ -1,6 +1,7 @@
 """Download and verify the official dataset archives."""
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -25,6 +26,7 @@ type DatasetName = Literal["concrete", "cracks"]
 type Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 MANIFEST_PATH = CONFIG_DIR / "datasets.yaml"
 DOWNLOAD_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+EXTRACTION_MANIFEST = ".baulens-extraction.json"
 
 
 class DatasetSpec(BaseModel):
@@ -144,7 +146,41 @@ def _valid_extraction(destination: Path, spec: DatasetSpec) -> bool:
             count = sum(entry.name.endswith(".jpg") and entry.is_file() for entry in entries)
         if count != expected_count:
             return False
-    return True
+    return _matches_extraction_manifest(destination, spec)
+
+
+def _hash_tree(root: Path) -> dict[str, str]:
+    """Return SHA-256 digests of every extracted file keyed by POSIX-relative path."""
+    digests: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and path.name != EXTRACTION_MANIFEST:
+            with path.open("rb") as source:
+                digests[path.relative_to(root).as_posix()] = hashlib.file_digest(
+                    source, "sha256"
+                ).hexdigest()
+    return digests
+
+
+def _write_extraction_manifest(root: Path, spec: DatasetSpec) -> None:
+    """Record per-file digests of an extraction that came from the verified archive."""
+    manifest = {"archive_sha256": spec.sha256, "files": _hash_tree(root)}
+    (root / EXTRACTION_MANIFEST).write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+
+
+def _matches_extraction_manifest(root: Path, spec: DatasetSpec) -> bool:
+    """Check that every file still matches the digests recorded at extraction time.
+
+    A missing, stale or unreadable manifest means the extraction is re-created from the
+    checksum-verified archive, so a truncated or edited image is never reused silently.
+    """
+    manifest_path = root / EXTRACTION_MANIFEST
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(manifest, dict) or manifest.get("archive_sha256") != spec.sha256:
+        return False
+    return bool(manifest.get("files") == _hash_tree(root))
 
 
 def _install_extraction(archive: Path, destination: Path, spec: DatasetSpec) -> None:
@@ -156,6 +192,7 @@ def _install_extraction(archive: Path, destination: Path, spec: DatasetSpec) -> 
                 zip_file.extractall(staged)
         else:
             _extract_rar(archive, staged)
+        _write_extraction_manifest(staged, spec)
         if not _valid_extraction(staged, spec):
             raise DatasetError(f"{archive.name} does not contain the expected dataset files.")
 
