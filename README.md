@@ -32,7 +32,7 @@ CPU PyTorch wheels have no musl (Alpine) builds, so `uv sync --locked` fails the
 | --- | --- |
 | `make data` | `uv run baulens data download all` |
 | `make strength` | `uv run baulens strength train`, `uv run baulens strength evaluate` |
-| `make cracks` | `uv run baulens cracks train`, `uv run baulens cracks evaluate`, `uv run baulens cracks export` |
+| `make cracks` | `uv run baulens cracks train`, `uv run baulens cracks evaluate`, `uv run baulens cracks export`, `uv run baulens cracks benchmark` |
 | `make report` | `uv run baulens report generate`, `uv run baulens report compare` |
 
 Pipeline code lives in `src/baulens/`, the dashboard placeholder is in `apps/dashboard/`, and
@@ -44,6 +44,12 @@ for module and output conventions.
 Run `make strength` after obtaining the concrete workbook. The [strength results](docs/results/strength.md)
 cover unseen exact ingredient tuples, the random-row comparison, and prediction intervals. See the
 [model card](docs/model_cards/strength.md) for intended use and the inference interface.
+
+### Cracks
+
+Run `make cracks` after `make data`. The [crack results](docs/results/cracks.md) cover the
+duplicate-aware split, test metrics, a corruption probe, Grad-CAM and the ONNX benchmark. See the
+[model card](docs/model_cards/cracks.md) for intended use and limitations.
 
 ### Datasets
 

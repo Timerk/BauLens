@@ -209,6 +209,8 @@ def train(config: CracksConfig) -> TrainResult:
             if val_loss < best_loss:
                 best_loss, best_f1, best_epoch, stale = val_loss, val_f1, epoch, 0
                 best_state = copy.deepcopy(model.state_dict())
+                # Keep the best weights on disk so an interrupted run still leaves a model.
+                torch.save({k: v.cpu() for k, v in best_state.items()}, paths.model)
             else:
                 stale += 1
                 if phase == "finetune" and stale >= config.patience:
