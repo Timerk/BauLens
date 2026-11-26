@@ -86,6 +86,19 @@ def test_ollama_client_raises_llm_error(response: httpx.Response) -> None:
         client.generate([], {}, generation_options(CONFIG))
 
 
+def test_malformed_ollama_metadata_falls_back_to_the_template() -> None:
+    # The review's payload: a 200 with an empty object and a list as done_reason.
+    payload = {"message": {"content": "{}"}, "done_reason": [], "eval_count": -3}
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    client = OllamaClient("http://ollama", "m", transport=transport)
+    response = client.generate([], {}, generation_options(CONFIG))
+    assert response.done_reason is None and response.eval_count is None
+    result = generate_report(crack_case(), client, CONFIG)
+    assert result.status == "invalid" and result.fallback_used
+    assert result.delivered.generator == "template"
+    assert "Ersatz" in result.delivered.provenance
+
+
 def test_ollama_client_wraps_transport_errors_and_reads_ps() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/ps":
@@ -137,15 +150,15 @@ def test_template_is_faithful_and_complete_on_every_case() -> None:
         assert result.completeness is not None and result.completeness.score == 1.0
 
 
+@pytest.mark.parametrize("mode", CONFIG.compare_modes)
 @pytest.mark.parametrize("model", CONFIG.models)
-def test_committed_replays_cover_every_case(model: str) -> None:
+def test_committed_replays_cover_every_case(model: str, mode: str) -> None:
     replay = ReplayClient.from_directory(REPLAY_DIR, model)
-    if len(replay) == 0:
-        pytest.skip(f"no replay recorded for {model}")
+    assert len(replay) > 0, f"no replay recorded for {model}"
     for case in load_cases(CASES_PATH):
-        result = generate_report(case, replay, CONFIG)
-        assert result.source == "replay", (case.case_id, result.note)
-        assert result.status in {"accepted", "rejected", "invalid"}
+        result = generate_report(case, replay, CONFIG, mode=mode)  # type: ignore[arg-type]
+        assert result.source == "replay"
+        assert result.status in {"accepted", "rejected", "invalid"}, (case.case_id, result.note)
 
 
 def _scripted_reply(cases: list[InspectionInput]) -> FakeClient:
