@@ -22,6 +22,12 @@ class StrengthConfig(PipelineConfig):
     test_fraction: float = Field(gt=0, lt=1)
     cv_splits: int = Field(ge=2)
     cv_repeats: PositiveInt
+    calibration_fraction: float = Field(default=0.25, gt=0, lt=1)
+    inner_splits: int = Field(default=3, ge=2)
+    bootstrap_resamples: int = Field(default=2000, ge=2000)
+    threads: PositiveInt = 2
+    results_path: Path = Path("docs/results/strength.md")
+    figures_dir: Path = Path("docs/figures/strength")
 
 
 class CracksConfig(PipelineConfig):
