@@ -35,10 +35,15 @@ CPU PyTorch wheels have no musl (Alpine) builds, so `uv sync --locked` fails the
 | `make cracks` | `uv run baulens cracks train`, `uv run baulens cracks evaluate`, `uv run baulens cracks export` |
 | `make report` | `uv run baulens report generate`, `uv run baulens report compare` |
 
-The strength, cracks, and report commands are stubs that report their planned milestone.
 Pipeline code lives in `src/baulens/`, the dashboard placeholder is in `apps/dashboard/`, and
 YAML settings live in `configs/` and `configs/smoke/`. See [CONTRIBUTING.md](CONTRIBUTING.md)
 for module and output conventions.
+
+### Strength
+
+Run `make strength` after obtaining the concrete workbook. The [strength results](docs/results/strength.md)
+cover unseen mix designs, the random-row leakage comparison, and prediction intervals. See the
+[model card](docs/model_cards/strength.md) for intended use and the inference interface.
 
 ### Datasets
 
