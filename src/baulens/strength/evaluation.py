@@ -12,7 +12,16 @@ from threadpoolctl import threadpool_limits  # type: ignore[import-untyped]
 
 from baulens.config import StrengthConfig
 from baulens.paths import project_path
-from baulens.strength.artifacts import atomic_file, run_identity, write_json
+from baulens.strength.artifacts import (
+    CV_SUMMARY_PATH,
+    FIT_FILES,
+    METADATA_PATH,
+    MODEL_PATH,
+    atomic_file,
+    read_fit_files,
+    run_identity,
+    write_json,
+)
 from baulens.strength.diagnostics import (
     error_summary,
     plot_residuals,
@@ -21,11 +30,11 @@ from baulens.strength.diagnostics import (
     worst_mixes,
 )
 from baulens.strength.features import RAW_FEATURES, TARGET
-from baulens.strength.inference import MODEL_FILE, FittedStrength, StrengthPredictor
+from baulens.strength.inference import FittedStrength, StrengthPredictor
 from baulens.strength.metrics import Scores, bootstrap_metrics, score_predictions
 from baulens.strength.modeling import predictions
 from baulens.strength.reporting import EvaluationReport, render_results
-from baulens.strength.splits import mix_groups, prepare_data
+from baulens.strength.splits import mix_groups, near_fitting_mix, prepare_data
 
 
 @dataclass(frozen=True)
@@ -39,37 +48,60 @@ class EvaluationResult:
 
 def evaluate(config: StrengthConfig) -> EvaluationResult:
     root = project_path(config.artifacts_dir)
-    if not (root / "model" / MODEL_FILE).is_file():
+    if not (root / MODEL_PATH).is_file():
         raise FileNotFoundError(f"Run strength train before evaluation. Expected {root / 'model'}")
     with FileLock(str(root / ".strength.lock")), threadpool_limits(limits=config.threads):
         return _evaluate(config, root)
 
 
 def _evaluate(config: StrengthConfig, root: Path) -> EvaluationResult:
-    model_dir = root / "model"
-    artifact = FittedStrength.load(model_dir)
+    files = read_fit_files(root / "model", FIT_FILES)
+    artifact = FittedStrength.from_bytes(files[MODEL_PATH])
     source = project_path(config.data_path)
     version, checksum = run_identity(config, source)
-    metadata = json.loads((model_dir / "metadata.json").read_text(encoding="utf-8"))
-    cv = json.loads((root / "cv_summary.json").read_text(encoding="utf-8"))
+    metadata = json.loads(files[METADATA_PATH])
+    cv = json.loads(files[CV_SUMMARY_PATH])
     if version != artifact.version or checksum != artifact.data_sha256:
         raise ValueError("This configuration or data differs from the fitted artifact")
-    if metadata["model_version"] != version or cv["model_version"] != version:
+    fitted_id = sha256(files[MODEL_PATH]).hexdigest()
+    if any(
+        sidecar.get("model_version") != version
+        or sidecar.get("fitted_artifact_sha256") != fitted_id
+        for sidecar in (metadata, cv)
+    ):
         raise ValueError("The model and training records differ. Run strength train again")
 
     frame, _ = prepare_data(source)
     groups = mix_groups(frame)
-    test = frame.iloc[artifact.partitions.test].assign(mix_id=groups)
-    artifact_checksum = sha256((model_dir / MODEL_FILE).read_bytes()).hexdigest()
-    test = _holdout_predictions(test, artifact, root / "holdout" / f"{artifact_checksum}.csv")
+    fit = frame.iloc[artifact.partitions.fit]
+    test = frame.iloc[artifact.partitions.test].assign(
+        mix_id=groups, strength_stratum=artifact.partitions.test_strata
+    )
+    test = test.assign(
+        near_fitting_mix=near_fitting_mix(fit, test), fitted_artifact_sha256=fitted_id
+    )
+    test = _holdout_predictions(test, artifact, root / "holdout" / f"{fitted_id}.csv")
     actual, point = test[TARGET].to_numpy(), test["predicted_mpa"].to_numpy()
     scores = score_predictions(actual, point)
     confidence = bootstrap_metrics(
-        actual, point, test["mix_id"], config.bootstrap_resamples, config.seed
+        actual,
+        point,
+        test["mix_id"],
+        test["strength_stratum"],
+        config.bootstrap_resamples,
+        config.seed,
     )
     overall = error_summary(test, "Overall")
     assert overall.coverage is not None
-    joint_coverage = float(test.groupby("mix_id")["covered"].all().mean())
+    covered_mixes = int(test.groupby("mix_id")["covered"].all().sum())
+    stratum_counts = test.groupby("strength_stratum")["mix_id"].nunique().to_list()
+    near_mix_errors = [
+        error_summary(test[test["near_fitting_mix"] == nearby], label)
+        for nearby, label in (
+            (True, "With a nearby fitting tuple"),
+            (False, "Without a nearby fitting tuple"),
+        )
+    ]
     age_errors, strength_errors = slice_errors(test)
 
     figure_dir = project_path(config.figures_dir)
@@ -77,17 +109,28 @@ def _evaluate(config: StrengthConfig, root: Path) -> EvaluationResult:
     calibration = frame.iloc[artifact.partitions.calibration]
     shap = plot_shap(StrengthPredictor(artifact), calibration, figure_dir, config.seed)
     report = EvaluationReport(
-        scores,
-        confidence,
-        overall,
-        age_errors,
-        strength_errors,
-        joint_coverage,
-        worst_mixes(test),
-        shap,
-        config.bootstrap_resamples,
+        scores=scores,
+        confidence=confidence,
+        overall=overall,
+        age_errors=age_errors,
+        strength_errors=strength_errors,
+        covered_rows=int(test["covered"].sum()),
+        covered_mixes=covered_mixes,
+        near_mix_errors=near_mix_errors,
+        stratum_counts=stratum_counts,
+        worst=worst_mixes(test),
+        shap=shap,
+        resamples=config.bootstrap_resamples,
     )
-    write_json(root / "test_metrics.json", {"model_version": version, **asdict(report)})
+    write_json(
+        root / "test_metrics.json",
+        {
+            "model_version": version,
+            "fitted_artifact_sha256": fitted_id,
+            "joint_coverage": report.joint_coverage,
+            **asdict(report),
+        },
+    )
     with atomic_file(root / "test_predictions.csv") as staged:
         test.to_csv(staged, index=False)
     results_path = project_path(config.results_path)

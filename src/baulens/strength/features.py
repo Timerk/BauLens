@@ -50,20 +50,28 @@ class MixFeatures(TransformerMixin, BaseEstimator):  # type: ignore[misc]
         check_is_fitted(self, "feature_names_in_")
         features = inputs.loc[:, list(RAW_FEATURES)].copy()
         if self.engineered:
-            cement = features["cement"]
-            scm = features["blast_furnace_slag"] + features["fly_ash"]
-            binder = cement + scm
-            coarse, fine = features["coarse_aggregate"], features["fine_aggregate"]
-            features = features.assign(
-                water_cement=_safe_ratio(features["water"], cement),
-                water_binder=_safe_ratio(features["water"], binder),
-                log_age=np.log(features["age_days"].clip(lower=1)),
-                scm_fraction=_safe_ratio(scm, binder),
-                superplasticizer_binder=_safe_ratio(features["superplasticizer"], binder),
-                coarse_fine_aggregate=_safe_ratio(coarse, fine),
-                aggregate_binder=_safe_ratio(coarse + fine, binder),
-                total_mass=features.loc[:, list(INGREDIENTS)].sum(axis=1),
-            )
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                cement = features["cement"]
+                scm = features["blast_furnace_slag"] + features["fly_ash"]
+                binder = cement + scm
+                coarse, fine = features["coarse_aggregate"], features["fine_aggregate"]
+                features = features.assign(
+                    water_cement=_safe_ratio(features["water"], cement),
+                    water_binder=_safe_ratio(features["water"], binder),
+                    log_age=np.log(features["age_days"].clip(lower=1)),
+                    scm_fraction=_safe_ratio(scm, binder),
+                    superplasticizer_binder=_safe_ratio(features["superplasticizer"], binder),
+                    coarse_fine_aggregate=_safe_ratio(coarse, fine),
+                    aggregate_binder=_safe_ratio(coarse + fine, binder),
+                    total_mass=features.loc[:, list(INGREDIENTS)].sum(axis=1),
+                )
+            names = list(FEATURE_RATIONALES)
+            nonfinite = ~np.isfinite(features.loc[:, names].to_numpy()).all(axis=0)
+            if nonfinite.any():
+                invalid = ", ".join(np.asarray(names)[nonfinite])
+                raise ValueError(
+                    f"Ingredient amounts produce non-finite engineered features: {invalid}"
+                )
         return features
 
     def get_feature_names_out(self, input_features: ArrayLike | None = None) -> np.ndarray:

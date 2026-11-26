@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import cast
 
@@ -12,11 +13,11 @@ import pandas as pd
 from sklearn.pipeline import Pipeline  # type: ignore[import-untyped]
 
 from baulens.schemas import ConcreteMix, FeatureContribution, StrengthPrediction
+from baulens.strength.artifacts import METADATA_PATH, MODEL_PATH, read_fit_files
 from baulens.strength.features import RAW_FEATURES
 from baulens.strength.modeling import Candidate, predictions
 from baulens.strength.splits import Partitions
 
-MODEL_FILE = "pipeline.joblib"
 COVERAGE = 0.90
 INTERVAL_METHOD = "split conformal (maximum absolute residual per mix)"
 
@@ -34,9 +35,15 @@ class FittedStrength:
 
     @classmethod
     def load(cls, model_dir: Path) -> FittedStrength:
-        artifact = joblib.load(model_dir / MODEL_FILE)
+        # The manifest uses paths relative to the artifacts root, even when only model/ is shipped.
+        files = read_fit_files(model_dir, (MODEL_PATH, METADATA_PATH))
+        return cls.from_bytes(files[MODEL_PATH])
+
+    @classmethod
+    def from_bytes(cls, model: bytes) -> FittedStrength:
+        artifact = joblib.load(BytesIO(model))
         if not isinstance(artifact, cls):
-            raise ValueError(f"Invalid strength artifact at {model_dir / MODEL_FILE}")
+            raise ValueError("Invalid fitted strength pipeline")
         return artifact
 
 

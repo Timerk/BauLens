@@ -1,8 +1,10 @@
 """Compare candidates, refit the CV winner, and calibrate without scoring the test set."""
 
 from dataclasses import asdict, dataclass
+from hashlib import sha256
 from importlib.metadata import version as package_version
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from time import perf_counter
 from typing import cast
 
@@ -14,9 +16,17 @@ from threadpoolctl import threadpool_limits  # type: ignore[import-untyped]
 from baulens.config import StrengthConfig
 from baulens.paths import project_path
 from baulens.seed import seed_everything
-from baulens.strength.artifacts import atomic_file, run_identity, write_json
+from baulens.strength.artifacts import (
+    CV_FOLDS_PATH,
+    CV_SUMMARY_PATH,
+    METADATA_PATH,
+    MODEL_PATH,
+    publish_fit,
+    run_identity,
+    write_json,
+)
 from baulens.strength.features import RAW_FEATURES, TARGET
-from baulens.strength.inference import COVERAGE, INTERVAL_METHOD, MODEL_FILE, FittedStrength
+from baulens.strength.inference import COVERAGE, INTERVAL_METHOD, FittedStrength
 from baulens.strength.metrics import CVSummary, conformal_radius, summarize_cv
 from baulens.strength.modeling import (
     FAMILIES,
@@ -134,18 +144,27 @@ def _train(config: StrengthConfig, root: Path) -> TrainResult:
             for c in candidates
         ],
         "row_cv": {metric: asdict(summary) for metric, summary in cv_summary(naive).items()},
+        "pooled_mae_mpa": {
+            "grouped": pooled_mae([x for x in grouped if x.candidate == winner]),
+            "row": pooled_mae(naive),
+        },
         "row_validation_overlap_fraction": (
             sum(x.overlapping_validation_rows for x in naive)
             / sum(x.validation_rows for x in naive)
         ),
         "permutation_mae_mpa": permutation,
     }
-    write_json(root / "cv_summary.json", evidence)
-    with atomic_file(root / "cv_folds.csv") as staged:
-        pd.DataFrame([_fold_record(x) for x in grouped + naive]).to_csv(staged, index=False)
-    write_json(model_dir / "metadata.json", metadata)
-    with atomic_file(model_dir / MODEL_FILE) as staged:
-        joblib.dump(artifact, staged, compress=3)
+    with TemporaryDirectory(dir=root) as directory:
+        staging = Path(directory)
+        (staging / "model").mkdir()
+        joblib.dump(artifact, staging / MODEL_PATH, compress=3)
+        fitted_id = sha256((staging / MODEL_PATH).read_bytes()).hexdigest()
+        write_json(staging / METADATA_PATH, {**metadata, "fitted_artifact_sha256": fitted_id})
+        write_json(staging / CV_SUMMARY_PATH, {**evidence, "fitted_artifact_sha256": fitted_id})
+        pd.DataFrame([_fold_record(x) for x in grouped + naive]).assign(
+            fitted_artifact_sha256=fitted_id
+        ).to_csv(staging / CV_FOLDS_PATH, index=False)
+        publish_fit(staging, root)
     return TrainResult(model_dir, winner.family, version, mae_by_candidate[winner])
 
 
@@ -155,6 +174,13 @@ def cv_summary(folds: list[FoldResult]) -> dict[str, CVSummary]:
         name: summarize_cv([getattr(fold.scores, name) for fold in folds], repeats)
         for name in ("mae", "rmse", "r2")
     }
+
+
+def pooled_mae(folds: list[FoldResult]) -> float:
+    """Weight each validation prediction equally across folds and repeats."""
+    return sum(fold.scores.mae * fold.validation_rows for fold in folds) / sum(
+        fold.validation_rows for fold in folds
+    )
 
 
 def _fold_record(fold: FoldResult) -> dict[str, object]:

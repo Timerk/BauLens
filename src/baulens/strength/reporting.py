@@ -13,7 +13,8 @@ from baulens.strength.diagnostics import (
     ShapSummary,
 )
 from baulens.strength.features import FEATURE_RATIONALES, TARGET
-from baulens.strength.metrics import Scores
+from baulens.strength.metrics import Scores, conformal_rank
+from baulens.strength.splits import NEAR_MIX_TOLERANCE
 
 METRICS = ("mae", "rmse", "r2")
 
@@ -31,6 +32,8 @@ class ModelMetadata(TypedDict):
     exact_duplicates_removed: int
     strength_bins: int
     partitions: dict[str, _Counts]
+    interval_coverage: float
+    fitted_artifact_sha256: str
     radius_mpa: float
     training_seconds: float
 
@@ -56,6 +59,7 @@ class _CandidateSummary(TypedDict):
 class CVEvidence(TypedDict):
     grouped: list[_CandidateSummary]
     row_cv: _CVMetrics
+    pooled_mae_mpa: dict[str, float]
     row_validation_overlap_fraction: float
     permutation_mae_mpa: dict[str, float]
 
@@ -67,10 +71,17 @@ class EvaluationReport:
     overall: ErrorSlice
     age_errors: list[ErrorSlice]
     strength_errors: list[ErrorSlice]
-    joint_coverage: float
+    covered_rows: int
+    covered_mixes: int
+    near_mix_errors: list[ErrorSlice]
+    stratum_counts: list[int]
     worst: list[dict[str, float]]
     shap: list[ShapSummary]
     resamples: int
+
+    @property
+    def joint_coverage(self) -> float:
+        return self.covered_mixes / self.overall.mixes
 
 
 def render_results(
@@ -85,9 +96,13 @@ def render_results(
     title = (
         "# Concrete compressive strength\n\n"
         f"**{model}** (`{metadata['model_version']}`) achieved **{report.scores.mae:.2f} MPa MAE** "
-        f"on {report.overall.mixes} unseen mix designs. The 90% prediction intervals covered "
-        f"{_fmt(report.overall.coverage, '.1%')} of measurements and "
-        f"{report.joint_coverage:.1%} of entire mixes.\n\n"
+        f"on {report.overall.mixes} unseen exact ingredient tuples. With a nominal "
+        f"{metadata['interval_coverage']:.0%} joint per-mix coverage target, the intervals covered "
+        f"{report.covered_rows}/{report.overall.rows} measurements "
+        f"({_fmt(report.overall.coverage, '.1%')}) and every measurement for "
+        f"{report.covered_mixes}/{report.overall.mixes} mixes ({report.joint_coverage:.1%}). "
+        "These are empirical results. The outcome-stratified test split leaves exchangeability "
+        "with the calibration mixes unestablished.\n\n"
         "## Data and protocol\n\n"
         f"This run read {metadata['rows_before_deduplication']} measurements from the "
         "[UCI concrete strength data](https://doi.org/10.24432/C5PK67). It removed "
@@ -130,8 +145,9 @@ def render_results(
         "```\n\n"
         f"Training took {metadata['training_seconds']:.1f} s on a CPU under shared load. "
         "The local `artifacts/strength/` directory contains every fold score, test prediction, "
-        "and a machine-readable copy of the metrics. Evaluation reuses cached predictions for "
-        "the identical fitted model.\n"
+        "and a machine-readable copy of the metrics. Evaluation verifies the fit manifest and "
+        "reuses cached predictions for the identical serialized artifact. The fitted artifact "
+        f"SHA-256 for this report is `{metadata['fitted_artifact_sha256']}`.\n"
     )
     return "\n".join(
         (
@@ -187,15 +203,17 @@ def _cv_tables(cv: CVEvidence, metadata: ModelMetadata) -> str:
             "The comparison uses the selected family and feature set, the same development rows, "
             "fold counts, seeds and tuning grid, and row splits at both CV levels.",
             "",
-            "| Protocol | MAE (MPa) | RMSE (MPa) | R² |",
-            "| --- | ---: | ---: | ---: |",
-            f"| Grouped | {_cv_cells(winner['metrics'])} |",
-            f"| Random row | {_cv_cells(cv['row_cv'])} |",
+            "| Protocol | Equal-fold MAE (MPa) | RMSE (MPa) | R² | Pooled OOF MAE (MPa) |",
+            "| --- | ---: | ---: | ---: | ---: |",
+            f"| Grouped | {_cv_cells(winner['metrics'])} | {cv['pooled_mae_mpa']['grouped']:.2f} |",
+            f"| Random row | {_cv_cells(cv['row_cv'])} | {cv['pooled_mae_mpa']['row']:.2f} |",
             "",
             f"In random-row CV, {cv['row_validation_overlap_fraction']:.1%} of validation rows "
             "shared their mix design with a fitting row. "
             f"Grouped minus random-row MAE was {grouped_mae - row_mae:+.2f} MPa. "
-            "The grouped score estimates error for an unseen formulation.",
+            "Pooled out-of-fold (OOF) MAE weights validation predictions equally across folds "
+            "and repeats. Fold sizes differ, so this comparison describes the split-protocol "
+            "difference for the selected model and feature set.",
             "",
         ]
     )
@@ -213,13 +231,17 @@ def _cv_cells(metrics: _CVMetrics) -> str:
 def _test_tables(report: EvaluationReport, metadata: ModelMetadata, figures: str) -> str:
     hardest_age = max(report.age_errors, key=lambda bucket: bucket.mae or 0.0)
     hardest_strength = max(report.strength_errors, key=lambda bucket: bucket.mae or 0.0)
+    calibration_mixes = metadata["partitions"]["calibration"]["mixes"]
+    rank = conformal_rank(calibration_mixes, metadata["interval_coverage"])
+    stratum_counts = ", ".join(map(str, report.stratum_counts))
     return "\n".join(
         [
-            "## Held-out mix designs",
+            "## Held-out exact ingredient tuples",
             "",
             f"95% percentile intervals use {report.resamples:,} bootstrap replicates. Each samples "
-            "complete test mixes with replacement and weights all measurements equally. The "
-            "bootstrap describes holdout uncertainty for the frozen fit.",
+            "complete test mixes with replacement within their original mean-strength strata, "
+            f"preserving the test mix count in each stratum ({stratum_counts}). Each replicate "
+            "weights measurements equally and describes holdout uncertainty for the frozen fit.",
             "",
             "| Metric | Estimate | 95% group bootstrap CI |",
             "| --- | ---: | ---: |",
@@ -230,17 +252,31 @@ def _test_tables(report: EvaluationReport, metadata: ModelMetadata, figures: str
                 for name, label in zip(METRICS, ("MAE (MPa)", "RMSE (MPa)", "R²"), strict=True)
             ),
             "",
-            f"![Residuals versus predicted strength on unseen mixes]({figures}/{RESIDUAL_FIGURE})",
+            f"![Residuals versus prediction on held-out tuples]({figures}/{RESIDUAL_FIGURE})",
+            "",
+            "### Sensitivity to nearby fitting tuples",
+            "",
+            f"A fitting tuple is nearby if each ingredient differs by at most "
+            f"{NEAR_MIX_TOLERANCE:g} kg/m³. Age and strength are excluded. This audit uses "
+            "the same frozen test predictions. The counts quantify similarity in ingredients. "
+            "The workbook omits batch IDs, so the slice MAEs are descriptive.",
+            "",
+            "| Test subset | Measurements | Exact tuples | MAE (MPa) |",
+            "| --- | ---: | ---: | ---: |",
+            *(
+                f"| {row.label} | {row.rows} | {row.mixes} | {_fmt(row.mae, '.2f')} |"
+                for row in report.near_mix_errors
+            ),
             "",
             "### Error and coverage by age",
             "",
             "Split conformal uses one maximum absolute residual per calibration mix. The "
-            f"finite-sample order statistic gave a radius of {metadata['radius_mpa']:.2f} MPa. "
-            "The same radius applies "
-            "to each prediction. With exchangeable mixes, this construction targets joint coverage "
-            "across the measured ages of a new mix. Strength stratification and source shift can "
-            "affect exchangeability. Empirical bucket coverage can vary in small samples. "
-            f"Every measurement was covered in {report.joint_coverage:.1%} of test mixes. "
+            f"score at rank {rank} of {calibration_mixes} gave a fixed radius of "
+            f"{metadata['radius_mpa']:.2f} MPa. This corresponds to rank probability "
+            f"{rank}/{calibration_mixes + 1} ({rank / (calibration_mixes + 1):.1%}) under "
+            "mix-score exchangeability and no ties. Exchangeability is assumed for that argument "
+            "and is unestablished with an outcome-stratified test split. Empirical bucket coverage "
+            "can vary in small samples. "
             "Positive bias means the model underpredicted the observed strength.",
             "",
             "| Age (days) | Rows | Mixes | MAE (MPa) | Bias (MPa) | Coverage | Mean width (MPa) |",

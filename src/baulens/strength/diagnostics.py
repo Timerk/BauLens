@@ -100,7 +100,7 @@ def plot_residuals(test: pd.DataFrame, directory: Path) -> None:
     axis.set(
         xlabel="Predicted strength (MPa)",
         ylabel="Observed minus predicted (MPa)",
-        title="Residuals on held-out mix designs",
+        title="Residuals on held-out exact tuples",
     )
     cb = figure.colorbar(scatter, ax=axis, label="Age (days, log scale)", pad=0.02)
     cb.set_ticks(np.log10([1, 7, 28, 91, 365]).tolist(), labels=["1", "7", "28", "91", "365"])

@@ -56,16 +56,25 @@ def summarize_cv(values: list[float | None], repeats: list[int]) -> CVSummary:
 def conformal_radius(errors: np.ndarray, groups: pd.Series[int], coverage: float) -> float:
     """Calibrate on one maximum absolute residual per calibration mix."""
     scores = pd.Series(np.abs(errors), index=groups.index).groupby(groups).max().to_numpy()
-    rank = ceil((len(scores) + 1) * coverage)
+    rank = conformal_rank(len(scores), coverage)
     if rank > len(scores):
         raise ValueError(f"Too few calibration mixes for finite {coverage:.0%} conformal intervals")
     return float(np.partition(scores, rank - 1)[rank - 1])
 
 
+def conformal_rank(calibration_mixes: int, coverage: float) -> int:
+    return ceil((calibration_mixes + 1) * coverage)
+
+
 def bootstrap_metrics(
-    actual: np.ndarray, predicted: np.ndarray, groups: pd.Series[int], resamples: int, seed: int
+    actual: np.ndarray,
+    predicted: np.ndarray,
+    groups: pd.Series[int],
+    strata: pd.Series[int],
+    resamples: int,
+    seed: int,
 ) -> dict[str, tuple[float | None, float | None]]:
-    """Use group sufficient statistics so sampled repeats keep every row in each selected mix."""
+    """Sample whole mixes and preserve the original number in every strength stratum."""
     centered = actual - actual.mean()
     stats = (
         pd.DataFrame(
@@ -78,13 +87,16 @@ def bootstrap_metrics(
             },
             index=groups.index,
         )
-        .groupby(groups)
+        .groupby([strata, groups])
         .sum()
-        .to_numpy()
     )
     generator = np.random.default_rng(seed)
-    selections = generator.integers(len(stats), size=(resamples, len(stats)))
-    n, absolute, squared, target, target_squared = stats[selections].sum(axis=1).T
+    totals = np.zeros((resamples, stats.shape[1]))
+    for _, stratum in stats.groupby(level=0):
+        size = len(stratum)
+        selections = generator.integers(size, size=(resamples, size))
+        totals += stratum.to_numpy()[selections].sum(axis=1)
+    n, absolute, squared, target, target_squared = totals.T
     sst = target_squared - target**2 / n
     values = {
         "mae": absolute / n,
