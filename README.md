@@ -25,6 +25,9 @@ uv run --locked pytest -m smoke
 With GNU Make, `make setup` installs the locked environment and `make all` runs the checks.
 The tests use local fixtures and mocked HTTP and run without a GPU or Ollama.
 
+Container images must use a glibc base such as `python:3.12-slim-bookworm`: ONNX Runtime and the
+CPU PyTorch wheels have no musl (Alpine) builds, so `uv sync --locked` fails there.
+
 | Make target | Commands without Make |
 | --- | --- |
 | `make data` | `uv run baulens data download all` |

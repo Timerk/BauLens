@@ -47,6 +47,12 @@ neural networks on crack detection in buildings. *Proceedings of the 35th Intern
 Symposium on Automation and Robotics in Construction*, 693–700.
 [10.22260/ISARC2018/0094](https://doi.org/10.22260/ISARC2018/0094).
 
+The publisher record additionally lists this paper among the references to cite.
+
+Zhang, L., Yang, F., Zhang, Y. D., & Zhu, Y. J. (2016). Road crack detection using deep
+convolutional neural network. *2016 IEEE International Conference on Image Processing (ICIP)*,
+3708–3712. [10.1109/ICIP.2016.7533052](https://doi.org/10.1109/ICIP.2016.7533052).
+
 ```bibtex
 @misc{ozgenel2019cracks,
   author = {Özgenel, Çağlar Fırat},
