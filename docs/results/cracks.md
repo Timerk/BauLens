@@ -258,6 +258,8 @@ whole Python process, including the imported libraries.
   representative data.
 - EfficientNet-B0 is implemented (`architecture: efficientnet_b0`) but was not trained here.
 - Provenance: `metadata.json` of this run records `git_sha` 93e814a with `git_dirty: true`,
-  because the SHA was read at the end of training. The training ran on source identical to
-  672c34c; the two later commits only touched tests. `train()` now records the revision at the
-  start of training.
+  because the SHA was read at the end of training. That commit belongs to the branch history
+  before the rebase onto `main`. Its `src/baulens/cracks`, data and seed code and
+  `configs/cracks.yaml` are identical to ec22c45 on this branch, and the commits after the
+  training start only touched tests. `train()` now records the revision at the start of
+  training.
