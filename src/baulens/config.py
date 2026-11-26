@@ -93,9 +93,21 @@ class CracksConfig(PipelineConfig):
 
 
 class ReportConfig(PipelineConfig):
+    """Report generation and model comparison; ``seed`` is passed to the model as well."""
+
     models: list[str] = Field(min_length=1)
     temperature: float = Field(ge=0, le=2)
     max_tokens: PositiveInt
+    num_ctx: PositiveInt = 4096
+    prompt_template: str = Field(default="report_v1", pattern=r"^[a-z0-9_]+$")
+    max_schema_retries: int = Field(default=1, ge=0, le=3)
+    max_correction_retries: int = Field(default=1, ge=0, le=3)
+    request_timeout_s: float = Field(default=600.0, gt=0)
+    keep_alive: str = "10m"
+    cases_path: Path = Path("data/report_cases/cases.jsonl")
+    replay_dir: Path = Path("data/report_replays")
+    results_doc: Path | None = Path("docs/results/report.md")
+    figures_dir: Path | None = Path("docs/figures/report")
 
 
 class ApiConfig(BaseModel):

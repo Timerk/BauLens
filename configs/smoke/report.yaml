@@ -4,3 +4,13 @@ models:
   - qwen2.5:3b
 temperature: 0.0
 max_tokens: 64
+num_ctx: 2048
+prompt_template: report_v1
+max_schema_retries: 1
+max_correction_retries: 1
+request_timeout_s: 60
+keep_alive: 1m
+cases_path: data/report_cases/cases.jsonl
+replay_dir: artifacts/report/smoke/replays
+results_doc: null
+figures_dir: artifacts/report/smoke/figures

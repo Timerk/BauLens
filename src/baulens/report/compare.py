@@ -1,0 +1,225 @@
+"""Run every evaluation case through every configured model and summarise the results.
+
+One command reproduces the committed numbers: ``baulens report compare``. Raw results go to
+``artifacts/report/runs/<timestamp>/``; the replay files, the figure and the generated block
+in ``docs/results/report.md`` are rewritten in place.
+"""
+
+import platform
+import re
+import time
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
+from pathlib import Path
+
+import psutil  # type: ignore[import-untyped]  # no stubs in the locked dev group
+from pydantic import BaseModel, ConfigDict
+
+from baulens.config import ReportConfig
+from baulens.paths import project_path
+from baulens.report.clients import LLMClient, OllamaClient
+from baulens.report.generate import generate_report, generate_template
+from baulens.report.metrics import (
+    TEMPLATE_ROW,
+    ModelMetrics,
+    compute_metrics,
+    metrics_table,
+    save_figure,
+)
+from baulens.report.monitor import LoadMonitor
+from baulens.report.prompting import load_prompt
+from baulens.report.replay import RecordingClient, replay_path, write_records
+from baulens.report.schemas import ReportResult
+from baulens.schemas import InspectionInput
+
+DOC_BEGIN = "<!-- compare:begin -->"
+DOC_END = "<!-- compare:end -->"
+FIGURE_NAME = "model_comparison.png"
+
+
+class RunInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    started_at: str
+    finished_at: str
+    prompt_version: str
+    cases: int
+    ollama_version: str | None
+    machine: str
+    logical_cpus: int | None
+    memory_gib: float
+    cpu_before_percent: float
+    options: dict[str, float | int | str]
+
+
+class ComparisonRun(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    info: RunInfo
+    metrics: list[ModelMetrics]
+    run_dir: str
+
+
+Progress = Callable[[str], None]
+
+
+def _write_results(path: Path, results: Sequence[ReportResult]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for result in results:
+            handle.write(result.model_dump_json() + "\n")
+
+
+def _file_stem(model: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", model)
+
+
+def run_model(
+    model: str,
+    cases: Sequence[InspectionInput],
+    client: LLMClient,
+    config: ReportConfig,
+    *,
+    results_path: Path,
+    record_replays: bool,
+    progress: Progress,
+) -> ModelMetrics:
+    load_time_s = client.load() if isinstance(client, OllamaClient) else None
+    recorder = RecordingClient(client)
+    results: list[ReportResult] = []
+    sizes: list[int] = []
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    with LoadMonitor() as monitor, results_path.open("w", encoding="utf-8", newline="\n") as out:
+        for index, case in enumerate(cases, start=1):
+            result = generate_report(case, recorder, config)
+            results.append(result)
+            out.write(result.model_dump_json() + "\n")
+            out.flush()
+            if isinstance(client, OllamaClient) and (size := client.loaded_size_bytes()):
+                sizes.append(size)
+            violations = (
+                len(result.initial_faithfulness.violations) if result.initial_faithfulness else "-"
+            )
+            progress(
+                f"{model} {index}/{len(cases)} {case.case_id}: {result.status} "
+                f"(initial violations {violations}, {result.latency_s:.0f} s)"
+            )
+    if record_replays:
+        write_records(replay_path(project_path(config.replay_dir), model), recorder.records)
+    if isinstance(client, OllamaClient):
+        client.unload()
+    return compute_metrics(
+        model,
+        results,
+        load=monitor.summary(),
+        load_time_s=load_time_s,
+        loaded_size_bytes=max(sizes) if sizes else None,
+    )
+
+
+def run_template(
+    cases: Sequence[InspectionInput], config: ReportConfig, *, results_path: Path
+) -> ModelMetrics:
+    results = []
+    for case in cases:
+        started = time.perf_counter()
+        result = generate_template(case, config=config)
+        results.append(result.model_copy(update={"latency_s": time.perf_counter() - started}))
+    _write_results(results_path, results)
+    return compute_metrics(TEMPLATE_ROW, results)
+
+
+def update_results_doc(path: Path, block: str) -> bool:
+    """Replace the generated block between the markers; return False if they are missing."""
+    if not path.exists():
+        return False
+    text = path.read_text(encoding="utf-8")
+    pattern = re.compile(re.escape(DOC_BEGIN) + r".*?" + re.escape(DOC_END), re.DOTALL)
+    if not pattern.search(text):
+        return False
+    replacement = f"{DOC_BEGIN}\n{block.strip()}\n{DOC_END}"
+    path.write_text(pattern.sub(lambda _: replacement, text), encoding="utf-8", newline="\n")
+    return True
+
+
+def _summary_block(run: ComparisonRun) -> str:
+    info = run.info
+    return (
+        f"_Generated by `baulens report compare` on {info.finished_at[:10]}: {info.cases} cases, "
+        f"prompt `{info.prompt_version}`, Ollama {info.ollama_version or 'n/a'}, "
+        f"{info.machine}, {info.logical_cpus} logical CPUs, {info.memory_gib:.0f} GiB RAM. "
+        f"Measured under shared load (system CPU {info.cpu_before_percent:.0f} % before the "
+        f"run, other agents were training models), so latencies are pessimistic._\n\n"
+        + metrics_table(run.metrics)
+    )
+
+
+def run_comparison(
+    config: ReportConfig,
+    cases: Sequence[InspectionInput],
+    *,
+    models: Sequence[str] | None = None,
+    client_factory: Callable[[str], LLMClient],
+    ollama_version: str | None = None,
+    record_replays: bool = True,
+    update_docs: bool = True,
+    progress: Progress = lambda _: None,
+) -> ComparisonRun:
+    started = datetime.now(UTC)
+    run_dir = project_path(config.artifacts_dir) / "runs" / started.strftime("%Y%m%dT%H%M%SZ")
+    prompt = load_prompt(config.prompt_template)
+    cpu_before = float(psutil.cpu_percent(interval=2))
+    rows: list[ModelMetrics] = []
+    for model in models or config.models:
+        progress(f"running {model} on {len(cases)} cases")
+        client = client_factory(model)
+        try:
+            rows.append(
+                run_model(
+                    model,
+                    cases,
+                    client,
+                    config,
+                    results_path=run_dir / f"results_{_file_stem(model)}.jsonl",
+                    record_replays=record_replays,
+                    progress=progress,
+                )
+            )
+        finally:
+            if isinstance(client, OllamaClient):
+                client.close()
+    rows.append(run_template(cases, config, results_path=run_dir / "results_template.jsonl"))
+    info = RunInfo(
+        started_at=started.isoformat(timespec="seconds"),
+        finished_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        prompt_version=prompt.prompt_version,
+        cases=len(cases),
+        ollama_version=ollama_version,
+        machine=f"{platform.system()} {platform.release()}, {platform.processor() or 'CPU n/a'}",
+        logical_cpus=psutil.cpu_count(),
+        memory_gib=psutil.virtual_memory().total / 2**30,
+        cpu_before_percent=cpu_before,
+        options={
+            "temperature": config.temperature,
+            "seed": config.seed,
+            "max_tokens": config.max_tokens,
+            "num_ctx": config.num_ctx,
+            "max_schema_retries": config.max_schema_retries,
+            "max_correction_retries": config.max_correction_retries,
+        },
+    )
+    run = ComparisonRun(info=info, metrics=rows, run_dir=str(run_dir))
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "summary.json").write_text(run.model_dump_json(indent=2), encoding="utf-8")
+    block = _summary_block(run)
+    (run_dir / "summary.md").write_text(block, encoding="utf-8")
+    if config.figures_dir is not None:
+        subtitle = (
+            f"{len(cases)} synthetic cases · prompt {info.prompt_version} · temperature "
+            f"{config.temperature}, seed {config.seed} · CPU only, measured under shared load"
+        )
+        save_figure(rows, project_path(config.figures_dir) / FIGURE_NAME, subtitle=subtitle)
+    doc = project_path(config.results_doc) if update_docs and config.results_doc else None
+    if doc is not None and not update_results_doc(doc, block):
+        progress(f"markers not found in {config.results_doc}; table only in {run_dir}")
+    return run
