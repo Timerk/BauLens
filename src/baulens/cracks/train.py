@@ -1,6 +1,7 @@
 """Two-phase transfer learning with early stopping on validation loss."""
 
 import copy
+import io
 import json
 import logging
 import math
@@ -27,7 +28,7 @@ from baulens.cracks.data import (
     stratified_sample,
     train_transform,
 )
-from baulens.cracks.metadata import ModelMetadata, git_revision, run_paths
+from baulens.cracks.metadata import ModelMetadata, git_revision, publish_model, run_paths
 from baulens.cracks.model import (
     build_model,
     configure_trainable,
@@ -210,15 +211,19 @@ def train(config: CracksConfig) -> TrainResult:
             if val_loss < best_loss:
                 best_loss, best_f1, best_epoch, stale = val_loss, val_f1, epoch, 0
                 best_state = copy.deepcopy(model.state_dict())
-                # Keep the best weights on disk so an interrupted run still leaves a model.
-                torch.save({k: v.cpu() for k, v in best_state.items()}, paths.model)
+                # Best-so-far weights for inspection after an interruption. This file is
+                # never published: only the complete artifact below becomes a generation.
+                torch.save(
+                    {k: v.cpu() for k, v in best_state.items()}, paths.checkpoint_in_progress
+                )
             else:
                 stale += 1
                 if phase == "finetune" and stale >= config.patience:
                     break
 
     model.load_state_dict(best_state)
-    torch.save({k: v.cpu() for k, v in model.state_dict().items()}, paths.model)
+    weights = io.BytesIO()
+    torch.save({k: v.cpu() for k, v in model.state_dict().items()}, weights)
     wall_clock = time.perf_counter() - started
 
     frame = pd.DataFrame([asdict(row) for row in history])
@@ -242,7 +247,7 @@ def train(config: CracksConfig) -> TrainResult:
         "parameters": count_parameters(model),
         "history": [asdict(row) for row in history],
     }
-    ModelMetadata(
+    metadata = ModelMetadata(
         model_name=config.architecture,
         model_version=f"{config.architecture}-{created:%Y%m%d}-{git_sha[:7]}",
         architecture=config.architecture,
@@ -260,7 +265,10 @@ def train(config: CracksConfig) -> TrainResult:
         created_at=created.isoformat(timespec="seconds"),
         training=training,
         config=config.model_dump(mode="json"),
-    ).write(paths.model_dir)
+    )
+    # Weights, their digest and the split/input provenance are published as one generation.
+    publish_model(paths.model_dir, metadata, weights.getvalue())
+    paths.checkpoint_in_progress.unlink(missing_ok=True)
     (paths.root / "train_result.json").write_text(
         json.dumps(asdict(result), indent=2), encoding="utf-8"
     )

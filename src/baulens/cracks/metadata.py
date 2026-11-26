@@ -4,12 +4,20 @@ import hashlib
 import logging
 import subprocess
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
+from baulens.artifacts import (
+    ArtifactError,
+    current_generations,
+    publish_generation,
+    read_generation,
+    staging_directory,
+)
 from baulens.config import CracksConfig
 from baulens.cracks.model import Architecture
 from baulens.cracks.splits import data_checksum, split_checksum, split_settings
@@ -28,16 +36,9 @@ class RunPaths:
     figures: Path
 
     @property
-    def model(self) -> Path:
-        return self.model_dir / MODEL_FILE
-
-    @property
-    def onnx(self) -> Path:
-        return self.model_dir / ONNX_FILE
-
-    @property
-    def metadata(self) -> Path:
-        return self.model_dir / METADATA_FILE
+    def checkpoint_in_progress(self) -> Path:
+        """Best-so-far weights of a running training job; never read by evaluate or the API."""
+        return self.root / "checkpoint_in_progress.pt"
 
 
 def run_paths(config: CracksConfig) -> RunPaths:
@@ -62,6 +63,7 @@ class ModelMetadata(BaseModel):
     data_checksum: str
     split_checksum: str
     split_settings: dict[str, Any] | None = None
+    weights_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     git_sha: str
     git_dirty: bool
     torch_version: str
@@ -73,12 +75,54 @@ class ModelMetadata(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
-    def read(cls, model_dir: Path) -> "ModelMetadata":
-        return cls.model_validate_json((model_dir / METADATA_FILE).read_text(encoding="utf-8"))
+    def parse(cls, content: bytes) -> "ModelMetadata":
+        return cls.model_validate_json(content)
 
-    def write(self, model_dir: Path) -> None:
-        model_dir.mkdir(parents=True, exist_ok=True)
-        (model_dir / METADATA_FILE).write_text(self.model_dump_json(indent=2), encoding="utf-8")
+    def dump(self) -> bytes:
+        return (self.model_dump_json(indent=2) + "\n").encode()
+
+
+@dataclass(frozen=True)
+class PublishedModel:
+    """Verified bytes of one published generation (see :mod:`baulens.artifacts`)."""
+
+    directory: Path
+    metadata: ModelMetadata
+    weights: bytes
+    onnx: bytes | None
+
+
+def load_published(model_dir: Path, *, require_onnx: bool = False) -> PublishedModel:
+    """Read weights, metadata and (if present) the ONNX graph from the current generation.
+
+    Besides the generation manifest, the weights must match ``weights_sha256`` and the graph
+    must match ``onnx.sha256`` recorded in the metadata, so the sidecar describes exactly the
+    bytes that are loaded.
+    """
+    names = [MODEL_FILE, METADATA_FILE, *([ONNX_FILE] if require_onnx else [])]
+    directory, files = read_generation(model_dir, names, optional=[ONNX_FILE])
+    metadata = ModelMetadata.parse(files[METADATA_FILE])
+    if metadata.weights_sha256 != sha256(files[MODEL_FILE]).hexdigest():
+        raise ArtifactError(f"{MODEL_FILE} in {directory} does not match metadata weights_sha256")
+    graph = files.get(ONNX_FILE)
+    if graph is not None and metadata.onnx.get("sha256") != sha256(graph).hexdigest():
+        raise ArtifactError(f"{ONNX_FILE} in {directory} does not match metadata onnx.sha256")
+    return PublishedModel(directory, metadata, files[MODEL_FILE], graph)
+
+
+def publish_model(
+    model_dir: Path, metadata: ModelMetadata, weights: bytes, onnx_graph: bytes | None = None
+) -> Path:
+    """Publish weights, metadata and optionally a graph together as one new generation."""
+    metadata.weights_sha256 = sha256(weights).hexdigest()
+    if onnx_graph is not None and metadata.onnx.get("sha256") != sha256(onnx_graph).hexdigest():
+        raise ArtifactError("metadata onnx.sha256 does not describe the graph being published")
+    with staging_directory(model_dir) as staging:
+        (staging / MODEL_FILE).write_bytes(weights)
+        if onnx_graph is not None:
+            (staging / ONNX_FILE).write_bytes(onnx_graph)
+        (staging / METADATA_FILE).write_bytes(metadata.dump())
+        return publish_generation(staging, model_dir)
 
 
 def file_sha256(path: Path) -> str:
@@ -143,13 +187,13 @@ def verify_training_data(
         )
 
 
-def record_split_settings(metadata: ModelMetadata, config: CracksConfig, model_dir: Path) -> None:
-    """One-off migration for checkpoints saved before split settings were recorded.
+class LegacyMigrationError(RuntimeError):
+    """A pre-generation checkpoint could not be verified and was not migrated."""
 
-    Only called after :func:`verify_training_data` passed, i.e. the checksums prove that the
-    current manifest is the one the checkpoint was trained on, so its settings can be stamped.
-    """
-    if metadata.split_settings is None:
-        metadata.split_settings = split_settings(config)
-        metadata.write(model_dir)
-        logger.info("recorded split settings in %s (checksums matched)", model_dir)
+
+def legacy_files(model_dir: Path) -> tuple[Path, Path] | None:
+    """``model.pt`` and ``metadata.json`` of a checkpoint saved before generations existed."""
+    weights, metadata = model_dir / MODEL_FILE, model_dir / METADATA_FILE
+    if current_generations(model_dir) or not (weights.exists() and metadata.exists()):
+        return None
+    return weights, metadata

@@ -1,5 +1,6 @@
 """Transfer-learning backbones with a single crack logit, freezing helpers and device choice."""
 
+import io
 from collections.abc import Sequence
 from typing import Literal
 
@@ -103,3 +104,13 @@ def resolve_device(choice: DeviceChoice) -> torch.device:
 
 def count_parameters(model: nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters())
+
+
+def model_from_weights(
+    architecture: Architecture, weights: bytes, device: torch.device | None = None
+) -> nn.Module:
+    """Build the architecture and load a verified state-dict payload, in eval mode."""
+    model = build_model(architecture, pretrained=False)
+    state = torch.load(io.BytesIO(weights), map_location="cpu", weights_only=True)
+    model.load_state_dict(state)
+    return model.to(device or torch.device("cpu")).eval()
