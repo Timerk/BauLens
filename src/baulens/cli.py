@@ -11,7 +11,7 @@ import typer
 from rich.console import Console
 
 from baulens.artifacts import ArtifactError
-from baulens.config import CracksConfig, StrengthConfig, load_config
+from baulens.config import ApiConfig, CracksConfig, StrengthConfig, load_config
 from baulens.data.download import DatasetError, DatasetName, download_dataset
 from baulens.paths import project_path
 
@@ -20,10 +20,12 @@ data_app = typer.Typer(help="Fetch verified copies of the public datasets.", no_
 strength_app = typer.Typer(help="Predict concrete compressive strength.", no_args_is_help=True)
 cracks_app = typer.Typer(help="Classify cracks in concrete images.", no_args_is_help=True)
 report_app = typer.Typer(help="Draft German inspection reports.", no_args_is_help=True)
+api_app = typer.Typer(help="Serve the HTTP API.", no_args_is_help=True)
 app.add_typer(data_app, name="data")
 app.add_typer(strength_app, name="strength")
 app.add_typer(cracks_app, name="cracks")
 app.add_typer(report_app, name="report")
+app.add_typer(api_app, name="api")
 
 
 class DatasetSelection(StrEnum):
@@ -221,3 +223,33 @@ def report_generate() -> None:
 def report_compare() -> None:
     """Compare local models for inspection report drafting."""
     _pending(4)
+
+
+@api_app.command("serve")
+def api_serve(
+    config: Annotated[Path, typer.Option(help="YAML settings validated by ApiConfig.")] = Path(
+        "configs/api.yaml"
+    ),
+    host: Annotated[str | None, typer.Option(help="Override the configured host.")] = None,
+    port: Annotated[int | None, typer.Option(help="Override the configured port.")] = None,
+) -> None:
+    """Serve the inspection API with uvicorn (models are loaded once at startup)."""
+    import uvicorn
+
+    from baulens.api import create_app
+    from baulens.api.observability import configure_logging
+
+    try:
+        settings = load_config(config, ApiConfig)
+    except (OSError, ValueError) as error:
+        typer.echo(f"API configuration error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    configure_logging(settings.log_level)
+    uvicorn.run(
+        create_app(settings),
+        host=host or settings.host,
+        port=port or settings.port,
+        log_level=settings.log_level.lower(),
+        access_log=False,
+        proxy_headers=False,
+    )

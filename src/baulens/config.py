@@ -98,11 +98,38 @@ class ReportConfig(PipelineConfig):
 
 
 class ApiConfig(BaseModel):
+    """HTTP service settings.
+
+    ``artifacts_dir`` follows the pipeline layout: the service loads ``strength/model`` and
+    ``cracks/model`` below it and reports a missing model as an unavailable component.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     host: str
     port: int = Field(ge=1, le=65535)
     artifacts_dir: Path
+    cracks_backend: Literal["onnx", "torch"] = "onnx"
+    inference_threads: PositiveInt | None = 2
+    max_upload_bytes: PositiveInt = 10 * 1024 * 1024
+    max_image_pixels: PositiveInt = 40_000_000
+    gradcam_max_side: int = Field(default=512, ge=64, le=2048)
+    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:8501"])
+    report_config: Path = Path("configs/report.yaml")
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+
+    @property
+    def strength_model_dir(self) -> Path:
+        return project_path(self.artifacts_dir) / "strength" / "model"
+
+    @property
+    def strength_metrics_path(self) -> Path:
+        """Test metrics written by ``strength evaluate``; shown only if the version matches."""
+        return project_path(self.artifacts_dir) / "strength" / "test_metrics.json"
+
+    @property
+    def cracks_model_dir(self) -> Path:
+        return project_path(self.artifacts_dir) / "cracks" / "model"
 
 
 class Settings(BaseSettings):

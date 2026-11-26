@@ -1,3 +1,13 @@
 host: 127.0.0.1
 port: 8000
 artifacts_dir: artifacts
+cracks_backend: onnx
+inference_threads: 2
+max_upload_bytes: 10485760
+max_image_pixels: 40000000
+gradcam_max_side: 512
+cors_origins:
+  - http://localhost:8501
+  - http://127.0.0.1:8501
+report_config: configs/report.yaml
+log_level: INFO
