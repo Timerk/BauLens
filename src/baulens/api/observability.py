@@ -147,13 +147,46 @@ class BodySizeLimitMiddleware:
 
 
 async def _send_413(send: Send, max_bytes: int) -> None:
-    body = json.dumps(
-        {"detail": f"request body exceeds {max_bytes} bytes", "request_id": request_id_var.get()}
-    ).encode()
+    await send_json(send, 413, {"detail": f"request body exceeds {max_bytes} bytes"})
+
+
+class UnhandledErrorMiddleware:
+    """Turn an unexpected exception into a JSON 500 inside the CORS and request-id layers.
+
+    Starlette's own error middleware sits outside all user middleware, so its responses
+    would carry neither CORS headers nor the request id. The traceback is logged here; the
+    client sees only a generic message and the id to quote.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def tracking_send(message: Message) -> None:
+            nonlocal started
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracking_send)
+        except Exception:
+            logging.getLogger("baulens.api").exception("unhandled error")
+            if started:
+                raise
+            await send_json(send, 500, {"detail": "internal error"})
+
+
+async def send_json(send: Send, status: int, payload: dict[str, Any]) -> None:
+    body = json.dumps(payload | {"request_id": request_id_var.get()}).encode()
     await send(
         {
             "type": "http.response.start",
-            "status": 413,
+            "status": status,
             "headers": [
                 (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode()),

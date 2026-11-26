@@ -91,8 +91,13 @@ class CrackAnalysis(_Response):
     prediction: CrackPrediction
     image: ImageMetadata
     input_size_px: int = Field(description="The image is resized to this square for the model")
+    preview_jpeg_base64: str | None = Field(
+        default=None,
+        description="Upright (EXIF-normalised) RGB preview as JPEG, only with gradcam=true",
+    )
     gradcam_png_base64: str | None = Field(
-        default=None, description="Grad-CAM overlay as PNG, only if requested with gradcam=true"
+        default=None,
+        description="Grad-CAM overlay as PNG at the preview's size, only with gradcam=true",
     )
 
 

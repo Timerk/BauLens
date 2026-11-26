@@ -15,6 +15,7 @@ from baulens.api.models import API_PREFIX
 from baulens.api.observability import (
     BodySizeLimitMiddleware,
     RequestIdMiddleware,
+    UnhandledErrorMiddleware,
     request_id_var,
 )
 from baulens.api.report_service import ReportService, build_report_service
@@ -65,6 +66,13 @@ def create_app(
         redoc_url=None,
     )
     app.include_router(router, prefix=API_PREFIX)
+    # add_middleware wraps, so the last one added runs first. Order of a request:
+    # RequestId -> CORS -> UnhandledError -> BodySizeLimit -> routes. Every response,
+    # including a 413 from the body cap and an unexpected 500, therefore carries the request
+    # id and, for an allowed origin, the CORS headers.
+    # Multipart framing adds a few hundred bytes; 64 KiB of headroom is generous.
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=config.max_upload_bytes + 64 * 1024)
+    app.add_middleware(UnhandledErrorMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=config.cors_origins,
@@ -72,8 +80,6 @@ def create_app(
         allow_headers=["Content-Type", "X-Request-ID"],
         expose_headers=["X-Request-ID"],
     )
-    # Multipart framing adds a few hundred bytes; 64 KiB of headroom is generous.
-    app.add_middleware(BodySizeLimitMiddleware, max_bytes=config.max_upload_bytes + 64 * 1024)
     app.add_middleware(RequestIdMiddleware)
     _register_error_handlers(app)
     return app
@@ -98,8 +104,3 @@ def _register_error_handlers(app: FastAPI) -> None:
             for item in error.errors()
         ]
         return _error(422, details)
-
-    @app.exception_handler(Exception)
-    async def unexpected_error(request: Request, error: Exception) -> JSONResponse:
-        logger.exception("unhandled error")
-        return _error(500, "internal error")

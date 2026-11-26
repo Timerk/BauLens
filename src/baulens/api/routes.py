@@ -1,7 +1,6 @@
 """Versioned HTTP endpoints. Inference runs in the threadpool, never on the event loop."""
 
-import base64
-import io
+from dataclasses import dataclass
 from importlib.metadata import version
 from typing import Annotated, Any
 
@@ -24,7 +23,12 @@ from baulens.api.models import (
 from baulens.api.report_service import ReportUnavailableError
 from baulens.api.services import CrackService, Unavailable
 from baulens.api.state import Cracks, State, Strength
-from baulens.api.uploads import UploadRejectedError, decode_image, read_limited
+from baulens.api.uploads import (
+    UploadRejectedError,
+    decode_image,
+    encode_preview,
+    read_limited,
+)
 from baulens.cracks.inference import overlay_heatmap
 from baulens.schemas import ConcreteMix, CrackPrediction, StrengthPrediction
 
@@ -32,6 +36,10 @@ router = APIRouter()
 
 _ERRORS: dict[int | str, dict[str, Any]] = {
     503: {"model": ErrorResponse, "description": "Model or module not available"}
+}
+_JSON_ERRORS: dict[int | str, dict[str, Any]] = {
+    422: {"model": ErrorResponse, "description": "Invalid request body"},
+    **_ERRORS,
 }
 _UPLOAD_ERRORS: dict[int | str, dict[str, Any]] = {
     413: {"model": ErrorResponse, "description": "File or image dimensions too large"},
@@ -77,7 +85,7 @@ def models(state: State) -> ModelsResponse:
     return ModelsResponse(strength=strength, cracks=cracks)
 
 
-@router.post("/strength/predict", tags=["strength"], responses=_ERRORS)
+@router.post("/strength/predict", tags=["strength"], responses=_JSON_ERRORS)
 async def predict_strength(
     service: Strength,
     mix: Annotated[
@@ -85,27 +93,40 @@ async def predict_strength(
         Body(openapi_examples={"typical": {"summary": "C30/37-like mix", "value": EXAMPLE_MIX}}),
     ],
 ) -> StrengthPrediction:
-    """Compressive strength with a 90 % conformal interval and the top SHAP contributions."""
-    return await run_in_threadpool(service.predict, mix)
+    """Compressive strength with a 90 % conformal interval and the top SHAP contributions.
+
+    A mix that passes the schema bounds but makes an engineered ratio non-finite (e.g. a
+    vanishingly small cement content) is rejected with 422.
+    """
+    try:
+        return await run_in_threadpool(service.predict, mix)
+    except ValueError as error:
+        # ConcreteMix is already validated, so a ValueError here is about the input values.
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from error
 
 
-def _png_base64(image: Image.Image) -> str:
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG", optimize=True)
-    return base64.b64encode(buffer.getvalue()).decode("ascii")
+@dataclass(frozen=True)
+class _Classified:
+    prediction: CrackPrediction
+    preview: str | None
+    overlay: str | None
 
 
 def _classify(
     service: CrackService, image: Image.Image, gradcam: bool, max_side: int
-) -> tuple[CrackPrediction, str | None]:
+) -> _Classified:
     prediction = service.classifier.predict(image)
     if not gradcam:
-        return prediction, None
+        return _Classified(prediction, None, None)
+    # Preview and overlay come from the same upright image, so both panels match.
     preview = image.copy()
     preview.thumbnail((max_side, max_side))
-    heatmap = service.classifier.gradcam(image)
-    overlay = overlay_heatmap(preview, np.asarray(heatmap))
-    return prediction, _png_base64(overlay)
+    overlay = overlay_heatmap(preview, np.asarray(service.classifier.gradcam(image)))
+    return _Classified(
+        prediction,
+        encode_preview(preview, max_side, "JPEG"),
+        encode_preview(overlay, max_side, "PNG"),
+    )
 
 
 @router.post("/cracks/predict", tags=["cracks"], responses=_UPLOAD_ERRORS)
@@ -113,7 +134,9 @@ async def predict_cracks(
     state: State,
     service: Cracks,
     file: Annotated[UploadFile, File(description="JPEG or PNG surface image")],
-    gradcam: Annotated[bool, Query(description="Also return a Grad-CAM overlay")] = False,
+    gradcam: Annotated[
+        bool, Query(description="Also return the upright preview and a Grad-CAM overlay")
+    ] = False,
 ) -> CrackAnalysis:
     """Crack probability against the validation threshold, plus image metadata."""
     config = state.config
@@ -124,21 +147,22 @@ async def predict_cracks(
         )
     except UploadRejectedError as error:
         raise HTTPException(error.status_code, error.detail) from error
-    prediction, overlay = await run_in_threadpool(
+    result = await run_in_threadpool(
         _classify, service, validated.image, gradcam, config.gradcam_max_side
     )
     return CrackAnalysis(
-        prediction=prediction,
+        prediction=result.prediction,
         image=validated.metadata,
         input_size_px=service.info.image_size,
-        gradcam_png_base64=overlay,
+        preview_jpeg_base64=result.preview,
+        gradcam_png_base64=result.overlay,
     )
 
 
 @router.post(
     "/report",
     tags=["report"],
-    responses={403: {"model": ErrorResponse, "description": "Live mode disabled"}, **_ERRORS},
+    responses={403: {"model": ErrorResponse, "description": "Live mode disabled"}, **_JSON_ERRORS},
 )
 async def report(state: State, request: ReportRequest) -> ReportResponse:
     """German inspection report draft whose numbers passed the faithfulness check.

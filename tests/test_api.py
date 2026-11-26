@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pytest
 from api_helpers import build_crack_model, build_strength_model, image_bytes
 from fastapi.testclient import TestClient
@@ -23,6 +24,7 @@ from baulens.api.models import (
     ReportResponse,
     ReportSection,
 )
+from baulens.api.uploads import UploadRejectedError, decode_image, to_rgb
 from baulens.cli import app as cli_app
 from baulens.config import ApiConfig, Settings, load_config
 from baulens.schemas import CrackPrediction, ImageMetadata, StrengthPrediction
@@ -180,20 +182,68 @@ def test_crack_prediction_returns_metadata_and_request_id(client: TestClient) ->
     assert len(response.headers["X-Request-ID"]) == 32
 
 
-def test_gradcam_overlay_is_a_bounded_png(client: TestClient) -> None:
+def _decoded(payload: str) -> Image.Image:
+    return Image.open(io.BytesIO(base64.b64decode(payload)))
+
+
+def test_gradcam_overlay_and_preview_are_bounded_and_aligned(client: TestClient) -> None:
     response = upload(client, image_bytes("PNG", (600, 300)), "image/png", "a.png", "?gradcam=true")
     assert response.status_code == 200
-    overlay = Image.open(io.BytesIO(base64.b64decode(response.json()["gradcam_png_base64"])))
-    assert overlay.format == "PNG"
-    assert overlay.size == (256, 128)  # gradcam_max_side in the smoke config
+    overlay = _decoded(response.json()["gradcam_png_base64"])
+    preview = _decoded(response.json()["preview_jpeg_base64"])
+    assert (overlay.format, preview.format) == ("PNG", "JPEG")
+    assert overlay.size == preview.size == (256, 128)  # gradcam_max_side in the smoke config
 
 
-def test_exif_orientation_is_applied(client: TestClient) -> None:
+def test_without_gradcam_no_images_are_returned(client: TestClient) -> None:
+    body = upload(client, image_bytes()).json()
+    assert body["gradcam_png_base64"] is None
+    assert body["preview_jpeg_base64"] is None
+
+
+def test_exif_orientation_is_applied_to_model_input_and_previews(client: TestClient) -> None:
     exif = Image.Exif()
     exif[0x0112] = 6  # rotate 90° clockwise when displayed
-    response = upload(client, image_bytes(size=(80, 60), exif=exif.tobytes()))
-    image = response.json()["image"]
-    assert (image["width_px"], image["height_px"]) == (60, 80)
+    content = image_bytes(size=(80, 60), exif=exif.tobytes())
+    body = upload(client, content, query="?gradcam=true").json()
+    assert (body["image"]["width_px"], body["image"]["height_px"]) == (60, 80)
+    assert _decoded(body["preview_jpeg_base64"]).size == (60, 80)
+    assert _decoded(body["gradcam_png_base64"]).size == (60, 80)
+
+
+def _png(image: Image.Image, **save: object) -> bytes:
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", **save)
+    return buffer.getvalue()
+
+
+def _pixel(content: bytes) -> object:
+    return decode_image(content, "image/png", "probe.png", 10_000).image.getpixel((0, 0))
+
+
+def test_sixteen_bit_greyscale_is_scaled_not_saturated() -> None:
+    dark = Image.fromarray(np.full((8, 8), 256, dtype=np.uint16))  # 256 / 65535: near black
+    assert dark.mode.startswith("I;16")
+    assert _pixel(_png(dark)) == (1, 1, 1)
+    bright = Image.fromarray(np.full((8, 8), 65535, dtype=np.uint16))
+    assert _pixel(_png(bright)) == (255, 255, 255)
+
+
+@pytest.mark.parametrize(("mode", "colour"), [("RGBA", (0, 0, 0, 0)), ("LA", (0, 0))])
+def test_transparent_pixels_are_composited_on_white(mode: str, colour: tuple[int, ...]) -> None:
+    assert _pixel(_png(Image.new(mode, (8, 8), colour))) == (255, 255, 255)
+
+
+def test_palette_transparency_is_composited_on_white() -> None:
+    image = Image.new("P", (8, 8), 0)
+    image.putpalette([0, 0, 0] * 256)
+    assert _pixel(_png(image, transparency=0)) == (255, 255, 255)
+
+
+def test_unsupported_modes_are_rejected() -> None:
+    with pytest.raises(UploadRejectedError) as raised:
+        to_rgb(Image.new("F", (4, 4)))
+    assert raised.value.status_code == 415
 
 
 def _gif() -> bytes:
@@ -208,7 +258,9 @@ def _gif() -> bytes:
         (b"plain text", "text/plain", 415),
         (image_bytes(), "application/octet-stream", 415),
         (_gif(), "image/gif", 415),
-        (_gif(), "image/png", 415),  # declared PNG, decoded GIF
+        (_gif(), "image/png", 422),  # only the JPEG and PNG decoders are enabled
+        (image_bytes("JPEG"), "image/png", 415),  # declared PNG, content JPEG
+        (image_bytes("PNG"), "image/jpeg", 415),  # declared JPEG, content PNG
         (b"not an image at all", "image/jpeg", 422),
         (b"", "image/jpeg", 422),
         (image_bytes()[:200], "image/jpeg", 422),  # truncated
@@ -227,9 +279,53 @@ def test_oversized_upload_is_refused_before_parsing(client: TestClient) -> None:
     response = upload(client, b"\xff" * (1024 * 1024 + 1))
     assert response.status_code == 413
     body_limit = 1024 * 1024 + 64 * 1024
-    response = upload(client, b"\xff" * (body_limit + 1))
+    response = client.post(
+        f"{V1}/cracks/predict",
+        files={"file": ("big.jpg", b"\xff" * (body_limit + 1), "image/jpeg")},
+        headers={"Origin": "http://localhost:8501", "X-Request-ID": "upload-12345678"},
+    )
     assert response.status_code == 413
     assert "request body exceeds" in response.json()["detail"]
+    assert response.json()["request_id"] == "upload-12345678"
+    assert response.headers["X-Request-ID"] == "upload-12345678"
+    assert response.headers["access-control-allow-origin"] == "http://localhost:8501"
+
+
+def test_pixel_limit_is_checked_before_verification(client: TestClient) -> None:
+    # A 4.2 MP header followed by corrupt data: the pixel budget answers before verify().
+    content = bytearray(image_bytes("PNG", (2100, 2000)))
+    content[-40:-12] = bytes(28)
+    assert upload(client, bytes(content), "image/png").status_code == 413
+
+
+def test_mix_with_non_finite_ratios_is_a_client_error(client: TestClient) -> None:
+    response = client.post(
+        f"{V1}/strength/predict",
+        json=MIX | {"cement": 5e-324},
+        headers={"X-Request-ID": "overflow-1234"},
+    )
+    assert response.status_code == 422
+    assert "non-finite" in response.json()["detail"]
+    assert response.json()["request_id"] == "overflow-1234"
+
+
+class _ExplodingReportService(FakeReportService):
+    def generate(self, request: ReportRequest) -> ReportResponse:
+        raise RuntimeError("secret internal state at C:/models")
+
+
+def test_unexpected_errors_keep_request_id_and_cors(artifacts: Path) -> None:
+    app = create_app(api_config(artifacts), settings(), report_service=_ExplodingReportService([]))
+    with TestClient(app) as wired:
+        response = wired.post(
+            f"{V1}/report",
+            json={"case": {"case_id": "PB-1", "crack": CRACK}},
+            headers={"Origin": "http://localhost:8501", "X-Request-ID": "boom-12345678"},
+        )
+    assert response.status_code == 500
+    assert response.json() == {"detail": "internal error", "request_id": "boom-12345678"}
+    assert response.headers["X-Request-ID"] == "boom-12345678"
+    assert response.headers["access-control-allow-origin"] == "http://localhost:8501"
 
 
 def test_missing_file_field_is_a_validation_error(client: TestClient) -> None:
@@ -247,6 +343,8 @@ def test_missing_artifacts_make_endpoints_unavailable(tmp_path: Path) -> None:
         assert response.status_code == 503
         assert "no strength model" in response.json()["detail"]
         assert upload(empty, image_bytes()).status_code == 503
+        # Public details never reveal where the service looks for its models.
+        assert tmp_path.name not in json.dumps(health)
 
 
 def test_tampered_artifacts_are_reported_not_loaded(artifacts: Path, tmp_path: Path) -> None:
@@ -258,8 +356,25 @@ def test_tampered_artifacts_are_reported_not_loaded(artifacts: Path, tmp_path: P
     with TestClient(create_app(api_config(tmp_path), settings())) as tampered:
         cracks = tampered.get(f"{V1}/health").json()["components"]["cracks"]
         assert not cracks["ready"]
-        assert "failed verification" in cracks["detail"]
+        assert cracks["detail"].startswith("crack model could not be loaded (see server log)")
+        assert "manifest" not in cracks["detail"]
+        assert tmp_path.name not in cracks["detail"]
         assert tampered.post(f"{V1}/strength/predict", json=MIX).status_code == 200
+
+
+@pytest.mark.parametrize("scores", [None, [], "x", {"mae": "high", "rmse": True}])
+def test_malformed_optional_metrics_are_ignored(
+    artifacts: Path, tmp_path: Path, scores: object
+) -> None:
+    import shutil
+
+    shutil.copytree(artifacts / "strength", tmp_path / "strength")
+    with TestClient(create_app(api_config(tmp_path), settings())) as probe:
+        version = probe.get(f"{V1}/health").json()["components"]["strength"]["model_version"]
+    metrics = {"model_version": version, "scores": scores, "joint_coverage": None}
+    (tmp_path / "strength" / "test_metrics.json").write_text(json.dumps(metrics), "utf-8")
+    with TestClient(create_app(api_config(tmp_path), settings())) as service:
+        assert service.get(f"{V1}/models").json()["strength"]["test_metrics"] == {}
 
 
 def test_report_is_unavailable_until_the_module_is_wired(client: TestClient) -> None:
@@ -324,6 +439,10 @@ def test_openapi_documents_examples_and_errors(client: TestClient) -> None:
     assert {"413", "415", "422", "503"} <= set(
         schema["paths"][f"{V1}/cracks/predict"]["post"]["responses"]
     )
+    error_ref = "#/components/schemas/ErrorResponse"
+    for path in ("strength/predict", "report"):
+        response = schema["paths"][f"{V1}/{path}"]["post"]["responses"]["422"]
+        assert response["content"]["application/json"]["schema"]["$ref"] == error_ref
 
 
 def test_access_log_has_no_file_names(client: TestClient, caplog: pytest.LogCaptureFixture) -> None:
