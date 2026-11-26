@@ -4,3 +4,7 @@ artifacts_dir: artifacts/strength
 test_fraction: 0.2
 cv_splits: 5
 cv_repeats: 3
+calibration_fraction: 0.25
+inner_splits: 3
+bootstrap_resamples: 2000
+threads: 2

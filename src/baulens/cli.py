@@ -1,12 +1,15 @@
 """Command-line entry point for the BauLens pipelines."""
 
 from enum import StrEnum
+from pathlib import Path
 from typing import Annotated, Never
 
 import typer
 from rich.console import Console
 
+from baulens.config import StrengthConfig, load_config
 from baulens.data.download import DatasetError, DatasetName, download_dataset
+from baulens.paths import project_path
 
 app = typer.Typer(help="Run the BauLens inspection pipelines.", no_args_is_help=True)
 data_app = typer.Typer(help="Fetch verified copies of the public datasets.", no_args_is_help=True)
@@ -54,15 +57,65 @@ def _pending(milestone: int) -> Never:
 
 
 @strength_app.command("train")
-def strength_train() -> None:
+def strength_train(
+    config: Annotated[Path, typer.Option(help="YAML training configuration.")] = Path(
+        "configs/strength.yaml"
+    ),
+) -> None:
     """Train concrete compressive strength models."""
-    _pending(2)
+    from baulens.strength import train
+
+    try:
+        result = train(load_config(config, StrengthConfig))
+    except (OSError, ValueError) as error:
+        typer.echo(f"Strength training error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"{result.model_name} ({result.model_version}), CV MAE {result.grouped_cv_mae:.2f} MPa"
+    )
+    typer.echo(f"Model saved to {result.model_dir}")
 
 
 @strength_app.command("evaluate")
-def strength_evaluate() -> None:
-    """Evaluate the concrete compressive strength models."""
-    _pending(2)
+def strength_evaluate(
+    config: Annotated[Path, typer.Option(help="YAML training configuration.")] = Path(
+        "configs/strength.yaml"
+    ),
+) -> None:
+    """Evaluate the frozen winner on unseen concrete mix designs."""
+    from baulens.strength import evaluate
+
+    try:
+        result = evaluate(load_config(config, StrengthConfig))
+    except (OSError, ValueError) as error:
+        typer.echo(f"Strength evaluation error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"{result.model_name} ({result.model_version}), test MAE {result.scores.mae:.2f} MPa"
+    )
+    typer.echo(f"Interval coverage {result.coverage:.1%}. Results saved to {result.results_path}")
+
+
+@strength_app.command("predict")
+def strength_predict(
+    mix_json: Annotated[Path, typer.Option(help="JSON file containing a ConcreteMix.")],
+    config: Annotated[Path, typer.Option(help="YAML training configuration.")] = Path(
+        "configs/strength.yaml"
+    ),
+) -> None:
+    """Predict strength and return the prediction as JSON."""
+    from baulens.schemas import ConcreteMix
+    from baulens.strength.inference import StrengthPredictor
+
+    try:
+        settings = load_config(config, StrengthConfig)
+        mix = ConcreteMix.model_validate_json(mix_json.read_text(encoding="utf-8"))
+        predictor = StrengthPredictor.load(project_path(settings.artifacts_dir) / "model")
+        result = predictor.predict(mix)
+    except (OSError, ValueError) as error:
+        typer.echo(f"Strength prediction error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(result.model_dump_json(indent=2))
 
 
 @cracks_app.command("train")
