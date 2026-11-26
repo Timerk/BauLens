@@ -5,7 +5,8 @@ Binary classification of 227 × 227 px concrete surface patches (crack / no crac
 ResNet18 transfer learning on a laptop CPU. Model card: [docs/model_cards/cracks.md](../model_cards/cracks.md).
 
 **Summary.** On the held-out test split (6,000 images, duplicates grouped), the model makes 6
-errors: F1 0.9990 (95 % CI 0.9981–0.9997), ROC-AUC 0.999997. **Treat this as near-ceiling
+errors: F1 0.9990 (95 % duplicate-group bootstrap CI 0.9982–0.9997; source-photo dependence
+not captured), ROC-AUC 0.999997 (rounded). **Treat this as near-ceiling
 performance on a homogeneous single-source dataset, not as evidence of field readiness.** The
 numbers that are informative here are elsewhere. A third of the dataset is duplicated, which
 would have leaked into a naive split. Low contrast and over-exposure cut recall noticeably. The
@@ -105,23 +106,37 @@ produced identical losses for epochs 1–6, so training is reproducible on CPU.
 
 ## 3. Threshold (validation only) and test metrics
 
-The decision threshold maximises F1 on the **validation** split over a 0.001 grid. Ties go to the
-threshold nearest 0.5, which avoids picking a value at the edge of a flat optimum. F1 rather
-than Youden's J is used because the classes are balanced and F1 focuses on the crack class; on
-validation both choose the same threshold. The chosen threshold, **0.954**, is high: on
-validation it removes 9 false positives and adds 2 false negatives compared with 0.5. It was
-then applied **once** to the test split.
+The decision threshold maximises F1 on the **validation** split over a 0.001 grid and was then
+applied **once** to the test split. F1 rather than Youden's J is used because the classes are
+balanced and F1 focuses on the crack class; on validation both choose the same value.
+
+Validation F1 is flat at its maximum (0.99867) for every grid threshold from **0.954 to 0.984**.
+The tie-break rule takes the grid value nearest 0.5. Because the whole plateau lies above 0.5,
+that is simply the plateau's **lower edge, 0.954**. The rule is deterministic, but it does not
+make the choice robust: the lower edge is set by single validation images. Removing the one
+validation negative with P = 0.9534 moves the threshold to **0.946**. Removing any one of the
+other 217 uncertain validation images (0.001 < P < 0.999) leaves it at 0.954 (leave-one-out,
+`threshold_leave_one_out` in `evaluation.json`). Compared with 0.5, the chosen threshold removes
+9 validation false positives and adds 2 false negatives.
 
 | Split (6,000 images each) | Precision | Recall | F1 | Accuracy | ROC-AUC | PR-AUC | ECE |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Validation | 0.9987 | 0.9987 | 0.9987 | 0.9987 | 0.99998 | 0.99998 | 0.0028 |
 | **Test** | **0.9993** | **0.9987** | **0.9990** | **0.9990** | **0.999997** | **0.999997** | **0.0012** |
-| Test, 95 % bootstrap CI | 0.9983–1.0000 | 0.9973–0.9997 | 0.9981–0.9997 | 0.9982–0.9997 | 0.99999–1.0 | 0.99999–1.0 | |
+| Test, 95 % CI (duplicate-group bootstrap) | 0.9983–1.0000 | 0.9973–0.9997 | 0.9982–0.9997 | 0.9982–0.9997 | 0.99999–1.0 | 0.99999–1.0 | |
 
-The confidence intervals are percentile bootstraps over test images (2,000 resamples, threshold
-fixed). Test confusion matrix: TN 2,998, FP 2, FN 4, TP 2,996. For transparency only (it was not
-used): at threshold 0.5 the test split would have had FP 5 and FN 1, with the same F1. Given the
-CIs, the two thresholds cannot be distinguished on this data.
+The intervals are percentile bootstraps with 2,000 resamples and the threshold held fixed. They
+resample the **5,003 detected duplicate groups** of the test split as units (singletons are their
+own group), so copies of one image do not count as independent evidence. An image-level
+bootstrap gives the same intervals to four decimals (`test_ci95_image_level`). Both are
+**conditional on this patch benchmark**: patches from the same source photo cannot be grouped,
+so the uncertainty from source-photo dependence remains **unmeasured**, and the true intervals
+are wider. ROC-AUC and PR-AUC values shown as 1.0 are rounded; the upper ends are below 1.
+
+Test confusion matrix: TN 2,998, FP 2, FN 4, TP 2,996. **Descriptive only** (0.5 was not
+considered for selection): at threshold 0.5 the test split would have had FP 5 and FN 1, with the
+same F1. The marginal intervals above do not test the paired difference between the two
+thresholds, and with 6 versus 6 errors no difference can be claimed.
 
 | ![Confusion matrix](../figures/cracks/confusion_matrix_test.png) | ![Reliability diagram](../figures/cracks/reliability_test.png) |
 | --- | --- |
@@ -132,9 +147,10 @@ CIs, the two thresholds cannot be distinguished on this data.
 confident: 99.8 % of test images get P < 1/15 or P > 14/15. The middle bins of the reliability
 diagram contain only 1–4 images each, so the curve there is noise, and the small ECE mostly
 reflects how few images fall into those bins. It does not show that intermediate probabilities
-are meaningful. Under the corruptions below, the model loses recall while its precision stays at
-1.0. In other words, confidence does not drop as image quality drops, which is the more relevant
-calibration finding.
+are meaningful. Under the corruptions below, confidence and calibration change measurably but
+much less than recall. With contrast × 0.3, recall falls from 1.000 to 0.841, while mean
+max-class confidence only falls from 0.9995 to 0.9811 and ECE rises from 0.00058 to 0.03034.
+The model stays confident on many crack patches it now misses.
 
 **Why near-ceiling, and what that does not show.** The dataset is homogeneous: one campus, similar
 cameras and lighting, patches chosen to contain either a clear crack or plain surface, with few
@@ -150,30 +166,36 @@ A cheap stand-in for domain shift: corruptions applied to the original 227 px te
 stratified 2,000-image test subset, before the usual preprocessing, with the validation threshold
 fixed (`baulens.cracks.robustness`). On this subset the clean model makes no errors (F1 1.000).
 
-| Corruption | Level | Accuracy | Precision | Recall | F1 | Δ F1 | Δ recall |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| none | – | 1.0000 | 1.000 | 1.000 | 1.0000 | – | – |
-| Gaussian blur | radius 1 px | 1.0000 | 1.000 | 1.000 | 1.0000 | 0.000 | 0.000 |
-| Gaussian blur | radius 2.5 px | 0.9955 | 1.000 | 0.991 | 0.9955 | −0.005 | −0.009 |
-| JPEG | quality 30 | 1.0000 | 1.000 | 1.000 | 1.0000 | 0.000 | 0.000 |
-| JPEG | quality 10 | 0.9990 | 0.999 | 0.999 | 0.9990 | −0.001 | −0.001 |
-| Brightness | × 0.6 | 1.0000 | 1.000 | 1.000 | 1.0000 | 0.000 | 0.000 |
-| Brightness | × 1.5 | 0.9845 | 1.000 | 0.969 | 0.9843 | −0.016 | −0.031 |
-| Contrast | × 0.6 | 0.9945 | 1.000 | 0.989 | 0.9945 | −0.006 | −0.011 |
-| **Contrast** | **× 0.3** | **0.9205** | **1.000** | **0.841** | **0.9136** | **−0.086** | **−0.159** |
-| Gaussian noise | σ = 8 | 1.0000 | 1.000 | 1.000 | 1.0000 | 0.000 | 0.000 |
-| Gaussian noise | σ = 20 | 0.9995 | 1.000 | 0.999 | 0.9995 | −0.001 | −0.001 |
-| Downscale | × 0.5 and back | 1.0000 | 1.000 | 1.000 | 1.0000 | 0.000 | 0.000 |
-| Downscale | × 0.25 and back | 0.9965 | 1.000 | 0.993 | 0.9965 | −0.004 | −0.007 |
+| Corruption | Level | Accuracy | Precision | Recall | F1 | ROC-AUC | Mean confidence | ECE | Δ F1 | Δ recall |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| none | – | 1.0000 | 1.000 | 1.000 | 1.0000 | 1.0† | 0.9995 | 0.00058 | – | – |
+| Gaussian blur | radius 1 px | 1.0000 | 1.000 | 1.000 | 1.0000 | 1.0† | 0.9995 | 0.00059 | 0.000 | 0.000 |
+| Gaussian blur | radius 2.5 px | 0.9955 | 1.000 | 0.991 | 0.9955 | 0.999995 | 0.9981 | 0.00251 | −0.005 | −0.009 |
+| JPEG | quality 30 | 1.0000 | 1.000 | 1.000 | 1.0000 | 1.0† | 0.9993 | 0.00067 | 0.000 | 0.000 |
+| JPEG | quality 10 | 0.9990 | 0.999 | 0.999 | 0.9990 | 0.999999 | 0.9993 | 0.00104 | −0.001 | −0.001 |
+| Brightness | × 0.6 | 1.0000 | 1.000 | 1.000 | 1.0000 | 1.0† | 0.9995 | 0.00051 | 0.000 | 0.000 |
+| Brightness | × 1.5 | 0.9845 | 1.000 | 0.969 | 0.9843 | 0.999988 | 0.9967 | 0.00520 | −0.016 | −0.031 |
+| Contrast | × 0.6 | 0.9945 | 1.000 | 0.989 | 0.9945 | 1.0† | 0.9987 | 0.00129 | −0.006 | −0.011 |
+| **Contrast** | **× 0.3** | **0.9205** | **1.000** | **0.841** | **0.9136** | **1.0†** | **0.9811** | **0.03034** | **−0.086** | **−0.159** |
+| Gaussian noise | σ = 8 | 1.0000 | 1.000 | 1.000 | 1.0000 | 1.0† | 0.9996 | 0.00038 | 0.000 | 0.000 |
+| Gaussian noise | σ = 20 | 0.9995 | 1.000 | 0.999 | 0.9995 | 1.0† | 0.9997 | 0.00026 | −0.001 | −0.001 |
+| Downscale | × 0.5 and back | 1.0000 | 1.000 | 1.000 | 1.0000 | 1.0† | 0.9995 | 0.00052 | 0.000 | 0.000 |
+| Downscale | × 0.25 and back | 0.9965 | 1.000 | 0.993 | 0.9965 | 1.0† | 0.9988 | 0.00131 | −0.004 | −0.007 |
+
+† Rounded to six decimals; the exact values are just below 1. Mean confidence is the mean of
+max(P, 1 − P). ECE uses 15 bins.
 
 ![Corruption probe](../figures/cracks/robustness.png)
 
-Every corruption that hurts reduces **recall**, while precision stays at 1.0. Strong low contrast
-(× 0.3) misses 16 % of cracks, and over-exposure (× 1.5) misses 3 %. ROC-AUC stays at 1.000 in
-every row, so the ranking survives and the probabilities shift down below the high threshold
-0.954. This fits the observation in section 1 that the model relies heavily on local contrast.
-For field use, flat lighting, haze, dust or overexposed photos are therefore the main risk, and
-the threshold would need to be re-chosen on representative images.
+For the tested perturbations, the corruptions that hurt mainly reduce **recall**. Strong low
+contrast (× 0.3) misses 16 % of cracks, and over-exposure (× 1.5) misses 3 %. Precision stays at
+1.000 except for JPEG quality 10, where it is 0.999 (one false positive). ROC-AUC stays at or
+above 0.99999, so the ranking of images survives. The probabilities of crack patches shift
+downwards, and some fall below the high threshold of 0.954. Confidence and ECE change much less
+than recall (see section 3). This fits the observation in section 1 that the model relies heavily
+on local contrast. These conclusions are limited to these synthetic perturbations of one dataset;
+real flat lighting, haze, dust or overexposure may act differently, and the threshold would need
+to be re-chosen on representative images.
 
 These corruptions are not a second dataset. The obvious next test is a cross-dataset evaluation
 on **SDNET2018** (Dorafshan et al., CC BY 4.0: bridge decks, walls and pavements with shadows,
@@ -181,7 +203,10 @@ stains and finer cracks), which this milestone does not implement.
 
 ## 5. Explainability: Grad-CAM and error gallery
 
-Grad-CAM is implemented with forward and backward hooks on `layer4` (`baulens.cracks.gradcam`).
+Grad-CAM is implemented with a forward hook on `layer4` and `torch.autograd.grad`
+(`baulens.cracks.gradcam`). The hook is registered once and stores activations only for the
+calling thread, and no parameter `.grad` buffers are written, so one shared model can explain
+concurrent API requests. A test checks this with two threads and different images.
 It weights the 512 activation maps by their spatially averaged gradient of the crack logit,
 applies ReLU, upsamples bilinearly and scales each image to [0, 1]. At 128 px input, `layer4` has
 only 4 × 4 cells, so the maps show *where roughly*, not the crack outline. Maps without positive
@@ -214,7 +239,12 @@ All 6 test errors are shown. Qualitative reading:
 `baulens cracks export` exports the model with the torch.export-based exporter (opset 18) and a
 dynamic batch axis. Outputs are `logit` and `probability`, each of shape (N,). The graph passes
 `onnx.checker.check_model(full_check=True)`, and the export compares PyTorch and ONNX Runtime
-(CPU EP) on 512 stratified test images, at batch 512 and batch 1.
+(CPU EP) on 512 stratified test images, at batch 512 and batch 1. The candidate graph is built in
+a staging directory. Only after the checker and the parity check pass are the graph and its
+metadata (including the graph's SHA-256) moved into place. A failed check leaves the published
+model untouched, and `CrackClassifier` refuses a `model.onnx` whose hash does not match the
+metadata. Export, evaluation and benchmark also refuse to run when the current data or split
+checksums differ from those recorded at training time.
 
 | Check | Result |
 | --- | --- |
@@ -226,21 +256,22 @@ dynamic batch axis. Outputs are `logit` and `probability`, each of shape (N,). T
 ## 7. CPU inference benchmark
 
 `baulens cracks benchmark` runs each backend in a fresh subprocess, with 10 warm-up and 100 timed
-iterations on preprocessed 128 px input. It ran on the AMD Ryzen 7 5700U (8 cores / 16 threads)
-with 6 intra-op threads. Other CPU jobs were running on the machine (system CPU 18 % in the second
-before the run), so treat the absolute numbers as indicative.
+iterations on preprocessed 128 px input, on the AMD Ryzen 7 5700U (8 cores / 16 threads) with 6
+intra-op threads. Both runs below shared the machine with other CPU jobs. The latest run (after
+the review fixes) saw 59 % system CPU in the second before it started, the first run 18 %. Treat
+the absolute numbers as indicative of the ratio, not of a dedicated machine.
 
 | Backend | Batch | Median latency | p95 latency | Throughput | Load time | Peak RSS |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| PyTorch eager | 1 | 15.7 ms | 39.3 ms | 64 img/s | 0.44 s | 500 MB |
-| PyTorch eager | 32 | 233 ms | 284 ms | 137 img/s | | |
-| **ONNX Runtime** | **1** | **5.0 ms** | **5.6 ms** | **199 img/s** | **0.11 s** | 514 MB |
-| ONNX Runtime | 32 | 120 ms | 128 ms | 266 img/s | | |
+| PyTorch eager | 1 | 21.2 ms (first run: 15.7) | 33.4 ms (39.3) | 47 img/s (64) | 0.27 s | 564 MB |
+| PyTorch eager | 32 | 349 ms (233) | 377 ms (284) | 92 img/s (137) | | |
+| **ONNX Runtime** | **1** | **6.5 ms (5.0)** | **11.1 ms (5.6)** | **153 img/s (199)** | **0.19 s** | 579 MB |
+| ONNX Runtime | 32 | 172 ms (120) | 184 ms (128) | 186 img/s (266) | | |
 
-ONNX Runtime is about 3 × faster at batch 1 and has a much tighter tail. End to end through the
-inference API (JPEG already decoded), `CrackClassifier.predict` takes about 6 ms. A Grad-CAM map
-takes about 50 ms, plus about 0.25 s once to load the PyTorch checkpoint. Peak RSS covers the
-whole Python process, including the imported libraries.
+ONNX Runtime is about 3 × faster at batch 1 in both runs. End to end through the inference API
+(JPEG already decoded), `CrackClassifier.predict` took about 6 ms with low background load. A
+Grad-CAM map takes about 50 ms, plus about 0.25 s once to load the PyTorch checkpoint. Peak RSS
+covers the whole Python process, including the imported libraries.
 
 ## 8. Limitations and open points
 
@@ -263,3 +294,8 @@ whole Python process, including the imported libraries.
   `configs/cracks.yaml` are identical to ec22c45 on this branch, and the commits after the
   training start only touched tests. `train()` now records the revision at the start of
   training.
+- Metadata migration: the checkpoint was saved before `split_settings` were recorded. After the
+  review, `evaluate` verified that the data and split checksums stored with the checkpoint match
+  the rebuilt content-keyed manifest. Only then did it stamp the split settings into
+  `metadata.json` (logged as "recorded split settings ... (checksums matched)"). No weights
+  were changed and no retraining was needed.
