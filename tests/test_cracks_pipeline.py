@@ -113,7 +113,7 @@ def test_inference_api_backends_agree(smoke_run: SmokeRun) -> None:
     assert abs(prediction.crack_probability - torch_model.predict(image).crack_probability) < 1e-4
     heatmap = onnx_model.gradcam(image)
     assert heatmap.shape == (64, 64)
-    assert 0 <= heatmap.min() and heatmap.max() <= 1
+    assert heatmap.min() >= 0 and heatmap.max() <= 1
     overlay = overlay_heatmap(image, heatmap)
     assert overlay.size == image.size
     assert np.asarray(overlay).dtype == np.uint8
