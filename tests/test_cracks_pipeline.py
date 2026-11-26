@@ -1,6 +1,8 @@
 """End-to-end smoke run of the crack pipeline on synthetic images (CPU, no network)."""
 
 import json
+import shutil
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from typer.testing import CliRunner
 
 from baulens.cli import app
 from baulens.config import CracksConfig, load_config
+from baulens.cracks import export as export_module
 from baulens.cracks.inference import CrackClassifier, overlay_heatmap
 from baulens.data.synthetic import make_synthetic_cracks
 from baulens.schemas import CrackPrediction
@@ -118,3 +121,86 @@ def test_inference_api_backends_agree(smoke_run: SmokeRun) -> None:
     overlay = overlay_heatmap(image, heatmap)
     assert overlay.size == image.size
     assert np.asarray(overlay).dtype == np.uint8
+
+
+def _copy_run(smoke_run: SmokeRun, destination: Path, **overrides: object) -> Path:
+    """Copy the trained run to ``destination`` and write a config pointing at the copy."""
+    shutil.copytree(smoke_run.root, destination)
+    settings = yaml.safe_load(smoke_run.config_path.read_text(encoding="utf-8"))
+    settings |= {"artifacts_dir": str(destination)} | overrides
+    path = destination.parent / f"{destination.name}.yaml"
+    path.write_text(yaml.safe_dump(settings), encoding="utf-8")
+    return path
+
+
+@pytest.mark.smoke
+def test_evaluate_export_and_benchmark_refuse_a_different_split(
+    smoke_run: SmokeRun, tmp_path: Path
+) -> None:
+    config_path = _copy_run(smoke_run, tmp_path / "reseeded", seed=43)
+    for command, message in (
+        ("evaluate", "Evaluation refused"),
+        ("export", "Export error"),
+        ("benchmark", "Benchmark refused"),
+    ):
+        result = runner.invoke(app, ["cracks", command, "--config", str(config_path)])
+        assert result.exit_code == 1, command
+        assert message in result.stderr
+        assert "split checksum" in result.stderr
+
+
+@pytest.mark.smoke
+def test_failed_parity_keeps_the_published_model(
+    smoke_run: SmokeRun, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = _copy_run(smoke_run, tmp_path / "failing")
+    config = load_config(config_path, CracksConfig)
+    model_dir = config.artifacts_dir / "model"
+    before = {name: (model_dir / name).read_bytes() for name in ("model.onnx", "metadata.json")}
+    monkeypatch.setattr(export_module, "parity", lambda *args: (1.0, 1.0, False))
+    with pytest.raises(export_module.ExportError, match="left unchanged"):
+        export_module.export(config)
+    for name, payload in before.items():
+        assert (model_dir / name).read_bytes() == payload
+    assert not list(model_dir.glob(".staging-*"))
+    assert CrackClassifier.load(model_dir, "onnx").threshold > 0
+
+
+@pytest.mark.smoke
+def test_onnx_graph_not_matching_metadata_is_refused(smoke_run: SmokeRun, tmp_path: Path) -> None:
+    config_path = _copy_run(smoke_run, tmp_path / "tampered")
+    model_dir = load_config(config_path, CracksConfig).artifacts_dir / "model"
+    (model_dir / "model.onnx").write_bytes((model_dir / "model.onnx").read_bytes() + b"\0")
+    with pytest.raises(ValueError, match="SHA-256"):
+        CrackClassifier.load(model_dir, "onnx")
+
+
+@pytest.mark.smoke
+def test_gradcam_is_safe_under_concurrent_requests(smoke_run: SmokeRun) -> None:
+    classifier = CrackClassifier.load(smoke_run.model_dir, "onnx")
+    images = [
+        Image.open(path).convert("RGB")
+        for path in (
+            next((smoke_run.data_dir / "Positive").glob("*.jpg")),
+            sorted((smoke_run.data_dir / "Positive").glob("*.jpg"))[-1],
+        )
+    ]
+    expected = [classifier.gradcam(image) for image in images]
+    assert not np.array_equal(expected[0], expected[1])
+    barrier = threading.Barrier(2)
+    failures: list[str] = []
+
+    def worker(position: int) -> None:
+        barrier.wait()
+        for _ in range(25):
+            heatmap = classifier.gradcam(images[position])
+            if not np.allclose(heatmap, expected[position], atol=1e-5):
+                failures.append(f"image {position} received another request's map")
+            classifier.predict(images[1 - position])
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert failures == []

@@ -20,7 +20,8 @@ import psutil  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from baulens.config import CracksConfig
-from baulens.cracks.metadata import run_paths
+from baulens.cracks.metadata import ModelMetadata, run_paths, verify_training_data
+from baulens.cracks.splits import ensure_splits
 from baulens.paths import PROJECT_ROOT
 
 BACKENDS = ("torch", "onnx")
@@ -108,6 +109,7 @@ def _worker(model_dir: Path, backend: str, threads: int, warmup: int, iterations
 def benchmark(config: CracksConfig) -> BenchmarkResult:
     """Benchmark both backends at batch 1 and 32 with warm-up; write ``benchmark.json``."""
     paths = run_paths(config)
+    verify_training_data(ModelMetadata.read(paths.model_dir), ensure_splits(config), config)
     threads = config.num_threads or psutil.cpu_count(logical=False) or 1
     load = float(psutil.cpu_percent(interval=1.0))
     runs: list[dict[str, Any]] = []

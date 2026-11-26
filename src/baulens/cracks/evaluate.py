@@ -23,12 +23,19 @@ from baulens.cracks.data import (
     stratified_head,
 )
 from baulens.cracks.gradcam import GradCAM, overlay_heatmap
-from baulens.cracks.metadata import ModelMetadata, run_paths
+from baulens.cracks.metadata import (
+    ModelMetadata,
+    record_split_settings,
+    run_paths,
+    verify_training_data,
+)
 from baulens.cracks.metrics import (
     binary_metrics,
     bootstrap_intervals,
     calibration,
     choose_threshold,
+    mean_confidence,
+    threshold_plateau,
 )
 from baulens.cracks.model import build_model, gradcam_layer
 from baulens.cracks.robustness import default_corruptions
@@ -101,9 +108,11 @@ def _robustness(
         metrics = binary_metrics(labels, probabilities, threshold)
         rows.append(
             {"corruption": label, "images": len(subset)}
+            | {k: round(metrics[k], 4) for k in ("accuracy", "precision", "recall", "f1")}
             | {
-                k: round(metrics[k], 4)
-                for k in ("accuracy", "precision", "recall", "f1", "roc_auc")
+                "roc_auc": round(metrics["roc_auc"], 6),
+                "mean_confidence": round(mean_confidence(probabilities), 4),
+                "ece": round(calibration(labels, probabilities, config.calibration_bins).ece, 5),
             }
         )
         logger.info("robustness %s: F1 %.4f", label, metrics["f1"])
@@ -112,6 +121,42 @@ def _robustness(
         row["delta_f1"] = round(row["f1"] - clean["f1"], 4)
         row["delta_recall"] = round(row["recall"] - clean["recall"], 4)
     return rows
+
+
+def _leave_one_out_thresholds(
+    labels: NDArray[np.int64], probabilities: NDArray[np.float64], config: CracksConfig
+) -> dict[str, Any]:
+    """Threshold chosen after removing each single uncertain validation image.
+
+    Images with P below 0.001 or above 0.999 cannot move the optimum's edges, so only the
+    others are tried. Reports the range of resulting thresholds and which removal moves it.
+    """
+    candidates = np.flatnonzero((probabilities > 0.001) & (probabilities < 0.999))
+    chosen = []
+    for i in candidates:
+        keep = np.ones(len(labels), dtype=bool)
+        keep[i] = False
+        chosen.append(
+            choose_threshold(labels[keep], probabilities[keep], config.threshold_strategy)
+        )
+    values = np.array(chosen) if chosen else np.array([np.nan])
+    extremes: dict[str, dict[str, float | int]] = {}
+    if chosen:
+        for name, position in (
+            ("lowest", int(np.argmin(values))),
+            ("highest", int(np.argmax(values))),
+        ):
+            removed = int(candidates[position])
+            extremes[name] = {
+                "threshold": float(values[position]),
+                "removed_label": int(labels[removed]),
+                "removed_probability": round(float(probabilities[removed]), 6),
+            }
+    return {
+        "images_tried": len(candidates),
+        "min": float(np.nanmin(values)),
+        "max": float(np.nanmax(values)),
+    } | extremes
 
 
 def _gallery(
@@ -151,6 +196,8 @@ def evaluate(config: CracksConfig) -> EvaluationResult:
     paths = run_paths(config)
     metadata = ModelMetadata.read(paths.model_dir)
     manifest = ensure_splits(config)
+    verify_training_data(metadata, manifest, config)
+    record_split_settings(metadata, config, paths.model_dir)
     data_dir = project_path(config.data_dir)
     model = load_torch_model(config, device)
     transform = EvalTransform(config.image_size)
@@ -177,12 +224,22 @@ def evaluate(config: CracksConfig) -> EvaluationResult:
     test_probs = frames["test"]["probability"].to_numpy()
     val_metrics = binary_metrics(val_labels, val_probs, threshold)
     test_metrics = binary_metrics(test_labels, test_probs, threshold)
+    plateau = threshold_plateau(val_labels, val_probs, config.threshold_strategy)
+    loo = _leave_one_out_thresholds(val_labels, val_probs, config)
+    image_intervals = bootstrap_intervals(
+        test_labels,
+        test_probs,
+        threshold,
+        resamples=config.bootstrap_resamples,
+        seed=config.seed,
+    )
     intervals = bootstrap_intervals(
         test_labels,
         test_probs,
         threshold,
         resamples=config.bootstrap_resamples,
         seed=config.seed,
+        groups=frames["test"]["group"].to_numpy(dtype=np.int64),
     )
     test_calibration = calibration(test_labels, test_probs, config.calibration_bins)
     val_calibration = calibration(val_labels, val_probs, config.calibration_bins)
@@ -250,6 +307,16 @@ def evaluate(config: CracksConfig) -> EvaluationResult:
         robustness=robustness,
     )
     report = asdict(result) | {
+        "ci_method": (
+            "percentile bootstrap over detected duplicate groups (singletons are their own "
+            "group), threshold fixed; source-photo dependence is not captured"
+        ),
+        "test_ci95_image_level": {
+            k: (round(lo, 6), round(hi, 6)) for k, (lo, hi) in image_intervals.items()
+        },
+        "test_groups": int(frames["test"]["group"].nunique()),
+        "threshold_plateau": plateau,
+        "threshold_leave_one_out": loo,
         "val_ece": round(val_calibration.ece, 6),
         "test_calibration": asdict(test_calibration),
         "bootstrap_resamples": config.bootstrap_resamples,

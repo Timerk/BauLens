@@ -36,7 +36,7 @@ from baulens.cracks.model import (
     set_train_mode,
     weights_name,
 )
-from baulens.cracks.splits import data_checksum, ensure_splits, split_checksum
+from baulens.cracks.splits import data_checksum, ensure_splits, split_checksum, split_settings
 from baulens.paths import project_path
 from baulens.seed import seed_everything
 
@@ -252,6 +252,7 @@ def train(config: CracksConfig) -> TrainResult:
         pretrained_weights=weights_name(config.architecture, config.pretrained),
         data_checksum=data_checksum(manifest),
         split_checksum=split_checksum(manifest),
+        split_settings=split_settings(config),
         git_sha=git_sha,
         git_dirty=git_dirty,
         torch_version=torch.__version__,

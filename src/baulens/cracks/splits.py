@@ -86,11 +86,35 @@ def list_images(data_dir: Path) -> list[tuple[Path, int]]:
     return images
 
 
-def index_images(data_dir: Path) -> tuple[pd.DataFrame, NDArray[np.float32]]:
-    """Read every image once: hashes, size, mode, intensity statistics and a grey thumbnail."""
+def scan_contents(data_dir: Path) -> pd.DataFrame:
+    """Path, label and SHA-256 of every image currently on disk (reads all bytes)."""
+    rows = []
+    for path, label in list_images(data_dir):
+        with path.open("rb") as source:
+            digest = hashlib.file_digest(source, "sha256").hexdigest()
+        rows.append(
+            {"path": path.relative_to(data_dir).as_posix(), "label": label, "sha256": digest}
+        )
+    return pd.DataFrame(rows)
+
+
+def index_images(
+    data_dir: Path, entries: pd.DataFrame | None = None
+) -> tuple[pd.DataFrame, NDArray[np.float32]]:
+    """Read images once: hashes, size, mode, intensity statistics and a grey thumbnail.
+
+    ``entries`` (columns path, label) restricts indexing to those files; default: all images.
+    """
+    if entries is None:
+        listed = [(path, label) for path, label in list_images(data_dir)]
+    else:
+        listed = [
+            (data_dir / path, int(label))
+            for path, label in zip(entries["path"], entries["label"], strict=True)
+        ]
     rows: list[dict[str, Any]] = []
     thumbs: list[NDArray[np.float32]] = []
-    for path, label in list_images(data_dir):
+    for path, label in listed:
         payload = path.read_bytes()
         with Image.open(path) as image:
             mode = image.mode
@@ -111,17 +135,50 @@ def index_images(data_dir: Path) -> tuple[pd.DataFrame, NDArray[np.float32]]:
                 "grey_std": float(rgb.mean(axis=2).std()),
             }
         )
-    return pd.DataFrame(rows), np.stack(thumbs)
+    empty = np.zeros((0, _THUMB, _THUMB), dtype=np.float32)
+    return pd.DataFrame(rows), np.stack(thumbs) if thumbs else empty
 
 
-def load_or_index(data_dir: Path, files: SplitFiles) -> tuple[pd.DataFrame, NDArray[np.float32]]:
-    """Reuse the cached index when it lists exactly the images currently on disk."""
-    current = [path.relative_to(data_dir).as_posix() for path, _ in list_images(data_dir)]
+def load_or_index(
+    data_dir: Path, files: SplitFiles, contents: pd.DataFrame | None = None
+) -> tuple[pd.DataFrame, NDArray[np.float32]]:
+    """Index the images on disk, reusing cached rows only where path, label *and* SHA-256 match.
+
+    Changed, added or replaced files are re-indexed, so a cached hash can never describe
+    different bytes than the file now on disk.
+    """
+    contents = scan_contents(data_dir) if contents is None else contents
+    cached: pd.DataFrame | None = None
+    cached_thumbs: NDArray[np.float32] | None = None
     if files.index.exists() and files.thumbnails.exists():
-        index = pd.read_csv(files.index, dtype={"phash": str})
-        if index["path"].tolist() == current:
-            return index, np.load(files.thumbnails)
-    index, thumbs = index_images(data_dir)
+        cached = pd.read_csv(files.index, dtype={"phash": str})
+        cached_thumbs = np.load(files.thumbnails)
+        if len(cached) != len(cached_thumbs):
+            cached = cached_thumbs = None
+    key = ["path", "label", "sha256"]
+    if cached is not None and cached_thumbs is not None:
+        position = pd.Series(np.arange(len(cached)), index=pd.MultiIndex.from_frame(cached[key]))
+        found = position.reindex(pd.MultiIndex.from_frame(contents[key]))
+    else:
+        found = pd.Series(np.nan, index=pd.MultiIndex.from_frame(contents[key]))
+    missing = contents[found.isna().to_numpy()]
+    if cached is not None and cached_thumbs is not None and missing.empty:
+        order = found.to_numpy(dtype=np.int64)
+        if np.array_equal(order, np.arange(len(cached))):
+            return cached, cached_thumbs
+    fresh, fresh_thumbs = index_images(data_dir, missing[["path", "label"]])
+    parts, thumb_parts = [], []
+    if cached is not None and cached_thumbs is not None:
+        reuse = found.dropna().to_numpy(dtype=np.int64)
+        parts.append(cached.iloc[reuse])
+        thumb_parts.append(cached_thumbs[reuse])
+    parts.append(fresh)
+    thumb_parts.append(fresh_thumbs)
+    combined = pd.concat(parts, ignore_index=True)
+    combined_thumbs = np.concatenate(thumb_parts)
+    order = combined.reset_index().set_index("path").loc[contents["path"], "index"].to_numpy()
+    index = combined.iloc[order].reset_index(drop=True)
+    thumbs = combined_thumbs[order]
     files.directory.mkdir(parents=True, exist_ok=True)
     index.to_csv(files.index, index=False, lineterminator="\n")
     np.save(files.thumbnails, thumbs)
@@ -374,9 +431,9 @@ def _leakage_figure(
     )
 
 
-def _settings(config: CracksConfig, data_dir: Path) -> dict[str, Any]:
+def split_settings(config: CracksConfig) -> dict[str, Any]:
+    """Settings that determine the split, recorded with the manifest and the checkpoint."""
     return {
-        "data_dir": str(data_dir),
         "seed": config.seed,
         "val_fraction": config.val_fraction,
         "test_fraction": config.test_fraction,
@@ -385,11 +442,18 @@ def _settings(config: CracksConfig, data_dir: Path) -> dict[str, Any]:
     }
 
 
-def build_splits(config: CracksConfig) -> pd.DataFrame:
+def _settings(config: CracksConfig, data_dir: Path, contents: pd.DataFrame) -> dict[str, Any]:
+    return {"data_dir": str(data_dir), "data_checksum": data_checksum(contents)} | split_settings(
+        config
+    )
+
+
+def build_splits(config: CracksConfig, contents: pd.DataFrame | None = None) -> pd.DataFrame:
     """Index the images, group duplicates, split and write manifest and leakage report."""
     files = split_files(config)
     data_dir = project_path(config.data_dir)
-    index, thumbs = load_or_index(data_dir, files)
+    contents = scan_contents(data_dir) if contents is None else contents
+    index, thumbs = load_or_index(data_dir, files, contents)
     pairs = candidate_pairs(index, thumbs, max(config.near_duplicate_max_distance, *_DISTANCE_GRID))
     duplicates = confirmed(
         pairs, config.near_duplicate_max_distance, config.near_duplicate_min_correlation
@@ -407,21 +471,31 @@ def build_splits(config: CracksConfig) -> pd.DataFrame:
     report = leakage_report(index, config, pairs, groups, splits)
     files.leakage.write_text(json.dumps(report, indent=2), encoding="utf-8")
     _leakage_figure(config, index, data_dir, pairs)
-    files.settings.write_text(json.dumps(_settings(config, data_dir), indent=2), encoding="utf-8")
+    settings = _settings(config, data_dir, contents)
+    files.settings.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     return manifest
 
 
 def ensure_splits(config: CracksConfig) -> pd.DataFrame:
-    """Load the manifest written for the same data and split settings, or build it."""
+    """Return the manifest for the current file *contents* and split settings.
+
+    Every call hashes all images. The cached manifest is reused only when the content
+    checksum and the split settings both match what it was built from; otherwise the index is
+    refreshed for changed files and the grouping and split are rebuilt.
+    """
     files = split_files(config)
-    expected = _settings(config, project_path(config.data_dir))
+    data_dir = project_path(config.data_dir)
+    contents = scan_contents(data_dir)
+    expected = _settings(config, data_dir, contents)
     if (
         files.manifest.exists()
         and files.settings.exists()
         and json.loads(files.settings.read_text(encoding="utf-8")) == expected
     ):
-        return pd.read_csv(files.manifest, dtype={"phash": str})
-    return build_splits(config)
+        manifest = pd.read_csv(files.manifest, dtype={"phash": str})
+        if data_checksum(manifest) == expected["data_checksum"]:
+            return manifest
+    return build_splits(config, contents)
 
 
 def data_checksum(manifest: pd.DataFrame) -> str:

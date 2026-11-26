@@ -158,8 +158,13 @@ def cracks_train(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
 def cracks_evaluate(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
     """Evaluate the concrete crack classifier."""
     from baulens.cracks.evaluate import evaluate
+    from baulens.cracks.metadata import TrainingDataMismatchError
 
-    result = asdict(evaluate(_cracks_config(config)))
+    try:
+        result = asdict(evaluate(_cracks_config(config)))
+    except TrainingDataMismatchError as error:
+        typer.echo(f"Evaluation refused: {error}", err=True)
+        raise typer.Exit(code=1) from error
     _echo_json({key: value for key, value in result.items() if key != "robustness"})
 
 
@@ -167,10 +172,11 @@ def cracks_evaluate(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
 def cracks_export(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
     """Export the concrete crack classifier as ONNX."""
     from baulens.cracks.export import ExportError, export
+    from baulens.cracks.metadata import TrainingDataMismatchError
 
     try:
         result = export(_cracks_config(config))
-    except ExportError as error:
+    except (ExportError, TrainingDataMismatchError) as error:
         typer.echo(f"Export error: {error}", err=True)
         raise typer.Exit(code=1) from error
     _echo_json(asdict(result))
@@ -180,8 +186,14 @@ def cracks_export(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
 def cracks_benchmark(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
     """Benchmark CPU inference latency of PyTorch and ONNX Runtime."""
     from baulens.cracks.benchmark import benchmark
+    from baulens.cracks.metadata import TrainingDataMismatchError
 
-    _echo_json(asdict(benchmark(_cracks_config(config))))
+    try:
+        result = benchmark(_cracks_config(config))
+    except TrainingDataMismatchError as error:
+        typer.echo(f"Benchmark refused: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _echo_json(asdict(result))
 
 
 @report_app.command("generate")

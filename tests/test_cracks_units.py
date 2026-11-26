@@ -9,6 +9,7 @@ import torch
 from PIL import Image
 from torch import nn
 
+from baulens.config import CracksConfig
 from baulens.cracks.data import preprocess
 from baulens.cracks.gradcam import GradCAM, overlay_heatmap
 from baulens.cracks.metrics import (
@@ -16,13 +17,16 @@ from baulens.cracks.metrics import (
     bootstrap_intervals,
     calibration,
     choose_threshold,
+    threshold_plateau,
 )
 from baulens.cracks.model import build_model, configure_trainable, gradcam_layer, resolve_device
 from baulens.cracks.robustness import default_corruptions
 from baulens.cracks.splits import (
     candidate_pairs,
     confirmed,
+    data_checksum,
     duplicate_groups,
+    ensure_splits,
     group_stratified_split,
     index_images,
 )
@@ -151,3 +155,46 @@ def test_corruptions_preserve_size_and_are_deterministic() -> None:
 def test_resolve_device_cpu() -> None:
     assert resolve_device("cpu").type == "cpu"
     assert resolve_device("auto").type in {"cpu", "cuda"}
+
+
+def test_split_cache_detects_replaced_contents(tiny_crack_images: Path, tmp_path: Path) -> None:
+    config = CracksConfig(
+        seed=1,
+        data_dir=tiny_crack_images,
+        artifacts_dir=tmp_path / "run",
+        architecture="resnet18",
+        image_size=64,
+        batch_size=4,
+        epochs=1,
+        pretrained=False,
+    )
+    first = ensure_splits(config)
+    held_out = first[first["split"] == "test"].iloc[0]
+    train = first[(first["split"] == "train") & (first["label"] == held_out["label"])].iloc[0]
+    (tiny_crack_images / held_out["path"]).write_bytes(
+        (tiny_crack_images / train["path"]).read_bytes()
+    )
+    second = ensure_splits(config).set_index("path")
+    assert second.loc[held_out["path"], "sha256"] == second.loc[train["path"], "sha256"]
+    assert second.loc[held_out["path"], "group"] == second.loc[train["path"], "group"]
+    assert second.loc[held_out["path"], "split"] == second.loc[train["path"], "split"]
+    assert data_checksum(second.reset_index()) != data_checksum(first)
+
+
+def test_group_bootstrap_resamples_whole_groups() -> None:
+    labels = np.array([1, 1, 1, 1, 0, 0])
+    probabilities = np.array([0.9, 0.9, 0.9, 0.2, 0.1, 0.1])
+    groups = np.array([0, 0, 0, 1, 2, 3])  # three copies of one confident positive
+    grouped = bootstrap_intervals(labels, probabilities, 0.5, resamples=400, seed=0, groups=groups)
+    single = bootstrap_intervals(labels, probabilities, 0.5, resamples=400, seed=0)
+    assert grouped["recall"][0] <= single["recall"][0]
+    for low, high in grouped.values():
+        assert low <= high
+
+
+def test_threshold_plateau_and_lower_edge_tie_break() -> None:
+    labels = np.array([0, 0, 1, 1])
+    probabilities = np.array([0.1, 0.7, 0.85, 0.95])
+    low, high = threshold_plateau(labels, probabilities, "f1")
+    assert (low, high) == (0.701, 0.85)
+    assert choose_threshold(labels, probabilities, "f1") == low

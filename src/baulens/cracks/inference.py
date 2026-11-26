@@ -1,5 +1,6 @@
 """Inference API used by the service layer: load once, classify PIL images, explain them."""
 
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
@@ -13,7 +14,7 @@ from torch import nn
 
 from baulens.cracks.data import preprocess
 from baulens.cracks.gradcam import GradCAM, overlay_heatmap
-from baulens.cracks.metadata import MODEL_FILE, ONNX_FILE, ModelMetadata
+from baulens.cracks.metadata import MODEL_FILE, ONNX_FILE, ModelMetadata, file_sha256
 from baulens.cracks.model import build_model, gradcam_layer
 from baulens.schemas import CrackPrediction
 
@@ -26,7 +27,9 @@ class CrackClassifier:
     """Patch-level crack classifier with the decision threshold chosen on validation.
 
     ``backend="onnx"`` serves predictions with ONNX Runtime; Grad-CAM always uses the
-    PyTorch checkpoint, which is loaded lazily on first use.
+    PyTorch checkpoint, which is loaded lazily on first use. One instance may serve
+    concurrent requests: lazy initialisation is locked, and Grad-CAM keeps its captures per
+    thread (see :class:`~baulens.cracks.gradcam.GradCAM`).
     """
 
     def __init__(
@@ -45,7 +48,15 @@ class CrackClassifier:
         self._threads = threads
         self._session: ort.InferenceSession | None = None
         self._torch: nn.Module | None = None
+        self._cam: GradCAM | None = None
+        self._init_lock = threading.Lock()
         if backend == "onnx":
+            expected = metadata.onnx.get("sha256")
+            if expected is None or file_sha256(model_dir / ONNX_FILE) != expected:
+                raise ValueError(
+                    f"{model_dir / ONNX_FILE} does not match the SHA-256 recorded by the last "
+                    "successful export; rerun `baulens cracks export`"
+                )
             options = ort.SessionOptions()
             if threads is not None:
                 options.intra_op_num_threads = threads
@@ -70,14 +81,25 @@ class CrackClassifier:
         return self.metadata.model_version
 
     def _torch_model(self) -> nn.Module:
-        if self._torch is None:
-            if self._threads is not None:
-                torch.set_num_threads(self._threads)
-            model = build_model(self.metadata.architecture, pretrained=False)
-            state = torch.load(self.model_dir / MODEL_FILE, map_location="cpu", weights_only=True)
-            model.load_state_dict(state)
-            self._torch = model.eval()
-        return self._torch
+        with self._init_lock:
+            if self._torch is None:
+                if self._threads is not None:
+                    torch.set_num_threads(self._threads)
+                model = build_model(self.metadata.architecture, pretrained=False)
+                state = torch.load(
+                    self.model_dir / MODEL_FILE, map_location="cpu", weights_only=True
+                )
+                model.load_state_dict(state)
+                self._torch = model.eval()
+            return self._torch
+
+    def _gradcam(self) -> GradCAM:
+        model = self._torch_model()
+        with self._init_lock:
+            if self._cam is None:
+                # Registered once; the hook list is never changed while requests run.
+                self._cam = GradCAM(model, gradcam_layer(model, self.metadata.architecture))
+            return self._cam
 
     def preprocess(self, images: Sequence[Image.Image]) -> NDArray[np.float32]:
         meta = self.metadata
@@ -116,8 +138,5 @@ class CrackClassifier:
 
         Use :func:`overlay_heatmap` to blend it over the original image at any size.
         """
-        model = self._torch_model()
-        batch = torch.from_numpy(self.preprocess([image]))
-        with GradCAM(model, gradcam_layer(model, self.metadata.architecture)) as cam:
-            heatmaps: NDArray[np.float32] = cam(batch)
+        heatmaps = self._gradcam()(torch.from_numpy(self.preprocess([image])))
         return np.asarray(heatmaps[0], dtype=np.float32)

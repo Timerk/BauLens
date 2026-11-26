@@ -26,20 +26,27 @@ def _counts(
     return tp, fp, fn, tn
 
 
+def _score(
+    tp: FloatArray, fp: FloatArray, fn: FloatArray, tn: FloatArray, strategy: str
+) -> FloatArray:
+    if strategy == "f1":
+        return np.divide(2 * tp, 2 * tp + fp + fn, out=np.zeros_like(tp), where=tp + fp + fn > 0)
+    return np.asarray(tp / np.maximum(tp + fn, 1) + tn / np.maximum(tn + fp, 1) - 1)
+
+
 def choose_threshold(
     labels: IntArray, probabilities: FloatArray, strategy: Literal["f1", "youden"]
 ) -> float:
-    """Best threshold on a 0.001 grid; ties go to the threshold closest to 0.5.
+    """Best threshold on a 0.001 grid; ties go to the grid value closest to 0.5.
 
-    With near-perfect separation many thresholds share the optimum. Taking the one nearest
-    0.5 avoids an arbitrary pick at the edge of the plateau, where a slightly shifted test
-    distribution would flip predictions first.
+    With near-perfect separation a whole interval of thresholds shares the optimum (see
+    :func:`threshold_plateau`). The rule is a deterministic tie-break that prefers the
+    conventional 0.5 when it is optimal. When the plateau lies entirely above (below) 0.5 it
+    returns the plateau's lower (upper) edge, so the choice then depends on single
+    validation images at that edge; report the plateau alongside the threshold.
     """
     tp, fp, fn, tn = _counts(labels, probabilities, THRESHOLD_GRID)
-    if strategy == "f1":
-        score = np.divide(2 * tp, 2 * tp + fp + fn, out=np.zeros_like(tp), where=tp + fp + fn > 0)
-    else:
-        score = tp / np.maximum(tp + fn, 1) + tn / np.maximum(tn + fp, 1) - 1
+    score = _score(tp, fp, fn, tn, strategy)
     best = np.flatnonzero(np.isclose(score, score.max(), rtol=0, atol=1e-12))
     return float(THRESHOLD_GRID[best[np.argmin(np.abs(THRESHOLD_GRID[best] - 0.5))]])
 
@@ -65,6 +72,14 @@ def binary_metrics(
     }
 
 
+def _group_layout(groups: IntArray) -> tuple[IntArray, IntArray, IntArray]:
+    codes = np.unique(groups, return_inverse=True)[1]
+    order = np.argsort(codes, kind="stable").astype(np.int64)
+    sizes = np.bincount(codes).astype(np.int64)
+    starts = np.concatenate([[0], np.cumsum(sizes)[:-1]]).astype(np.int64)
+    return order, sizes, starts
+
+
 def bootstrap_intervals(
     labels: IntArray,
     probabilities: FloatArray,
@@ -73,12 +88,26 @@ def bootstrap_intervals(
     resamples: int,
     seed: int,
     level: float = 0.95,
+    groups: IntArray | None = None,
 ) -> dict[str, tuple[float, float]]:
-    """Percentile bootstrap over test images with the threshold held fixed."""
+    """Percentile bootstrap with the threshold held fixed.
+
+    Without ``groups`` images are resampled independently. With ``groups`` whole groups
+    (here: detected duplicate groups, singletons being their own group) are resampled, so
+    copies of one image are not counted as independent evidence.
+    """
     rng = np.random.default_rng(seed)
     samples: dict[str, list[float]] = {name: [] for name in POINT_METRICS}
+    if groups is not None:
+        order, sizes, starts = _group_layout(groups)
     for _ in range(resamples):
-        draw = rng.integers(0, len(labels), len(labels))
+        if groups is None:
+            draw = rng.integers(0, len(labels), len(labels))
+        else:
+            chosen = rng.integers(0, len(sizes), len(sizes))
+            counts = sizes[chosen]
+            offsets = np.arange(counts.sum()) - np.repeat(np.cumsum(counts) - counts, counts)
+            draw = order[np.repeat(starts[chosen], counts) + offsets]
         metrics = binary_metrics(labels[draw], probabilities[draw], threshold)
         for name in POINT_METRICS:
             samples[name].append(metrics[name])
@@ -90,6 +119,21 @@ def bootstrap_intervals(
         )
         for name, values in samples.items()
     }
+
+
+def threshold_plateau(
+    labels: IntArray, probabilities: FloatArray, strategy: Literal["f1", "youden"]
+) -> tuple[float, float]:
+    """Lowest and highest grid threshold that attain the optimum (the plateau's edges)."""
+    tp, fp, fn, tn = _counts(labels, probabilities, THRESHOLD_GRID)
+    score = _score(tp, fp, fn, tn, strategy)
+    best = THRESHOLD_GRID[np.isclose(score, score.max(), rtol=0, atol=1e-12)]
+    return float(best.min()), float(best.max())
+
+
+def mean_confidence(probabilities: FloatArray) -> float:
+    """Mean max-class confidence, max(p, 1 - p)."""
+    return float(np.maximum(probabilities, 1 - probabilities).mean())
 
 
 @dataclass(frozen=True)
