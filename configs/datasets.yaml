@@ -1,0 +1,14 @@
+concrete:
+  url: https://archive.ics.uci.edu/static/public/165/concrete+compressive+strength.zip
+  filename: concrete.zip
+  sha256: dad85d14de8aee4e07479daa774e6b569a313715b71a3b92c95a07cf91c2c9a7
+  files:
+    Concrete_Data.xls: 710076c66b9ca3f8050e7942f3dcbdbe04013534daeb0077ffd3079a52d8e0c4
+    Concrete_Readme.txt: 5cd3cdb31d3cfd68287daa6b22ed0541d6932113e83ee0980ced63641af3441d
+cracks:
+  url: https://data.mendeley.com/public-files/datasets/5y9wdsg2zt/files/8a70d8a5-bce9-4291-bab9-b48cfb3e87c3/file_downloaded
+  filename: cracks.rar
+  sha256: 08d7dc505a4f5a0330cee2fa2a1ae4b5b4f98bcffd0549b774caf7959bb1f02f
+  jpeg_counts:
+    Positive: 20000
+    Negative: 20000
