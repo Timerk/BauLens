@@ -137,9 +137,14 @@ class OllamaClient:
             raise LLMError(f"Ollama response metadata is invalid: {error}") from error
 
     def load(self) -> float:
-        """Load the model into memory and return the reported load time in seconds."""
-        data = self._post("/api/generate", {"model": self._model, "keep_alive": self._keep_alive})
-        return (_int_or_none(data.get("load_duration")) or 0) / 1e9
+        """Load the model into memory; return the wall-clock time of the load request.
+
+        Ollama reports no ``load_duration`` for an empty load request, so the wall time
+        (including HTTP overhead) is the measured quantity.
+        """
+        started = time.perf_counter()
+        self._post("/api/generate", {"model": self._model, "keep_alive": self._keep_alive})
+        return time.perf_counter() - started
 
     def unload(self) -> None:
         self._post("/api/generate", {"model": self._model, "keep_alive": 0})

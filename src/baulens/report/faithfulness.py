@@ -45,7 +45,7 @@ from baulens.report.schemas import (
     SectionName,
 )
 
-CHECKER_VERSION = "2"
+CHECKER_VERSION = "3"
 """Bumped whenever a rule changes; resumed runs must match it."""
 
 ROLE_KEYWORDS: tuple[tuple[str, str], ...] = (
@@ -53,7 +53,8 @@ ROLE_KEYWORDS: tuple[tuple[str, str], ...] = (
     ("upper", r"ober\w*\s+grenze\w*|obergrenze\w*|ober(?:e|en|er|es)\b|höchstens|maximal\w*"),
     (
         "contribution",
-        r"\w*beitr(?:a|ä)g\w*|einfluss\w*|erhöh\w*|verringer\w*|minder\w*|steiger\w*|senk\w*|shap",
+        r"\w*beitr(?:a|ä)g\w*|einfluss\w*|erhöh\w*|verringer\w*|minder\w*|steiger\w*|senk\w*|shap"
+        r"|rückgang\w*|zunahme\w*|abnahme\w*|anstieg\w*",
     ),
     ("ratio", r"w/z\S*|wasserzement\w*|wasser-zement\w*"),
     ("threshold", r"\w*schwelle\w*|grenzwert\w*"),
@@ -141,7 +142,7 @@ def stated_roles(token: NumberToken) -> tuple[set[str], str] | None:
     """Roles the text assigns to a number and the keyword that did it; ``None`` if none."""
     if token.range_role is not None:
         return {token.range_role}, "Intervallangabe von … bis …"
-    for window, before in ((token.before, True), (token.after, False)):
+    for window, before in ((token.before, True), (token.after, False), (token.far, True)):
         keywords = [kw for kw in _keywords(window) if _relevant(kw.role, token.unit)]
         if not keywords:
             continue

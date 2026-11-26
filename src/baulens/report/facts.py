@@ -14,6 +14,7 @@ checker to bind a number to the words around it, and a *slot* name used by the s
 which the model writes ``{druckfestigkeit}`` and code inserts ``61,9 MPa``.
 """
 
+import itertools
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -464,9 +465,11 @@ def _identifiers(case: InspectionInput) -> list[Identifier]:
         element = case.image.element
         parts = [part.strip() for part in re.split(r"[,;()]", element)]
         words = [word.strip(".,;()") for word in element.split()]
+        # Two-word pieces survive inflection of the rest ("des Unterzuges Ebene 2").
+        pairs = [f"{first} {second}" for first, second in itertools.pairwise(words)]
         strings += [
             piece
-            for piece in parts + words
+            for piece in parts + pairs + words
             if any(c.isdigit() for c in piece) and piece[:1].isalpha()
         ]
     unique = list(dict.fromkeys(strings))

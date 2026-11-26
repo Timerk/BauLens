@@ -95,7 +95,12 @@ class NumberToken:
     before: str
     """Text before the number, back to the previous number or a clause boundary."""
     after: str
-    """Text after the unit, up to the next number or a clause boundary."""
+    """Text after the unit, up to the next number or a clause boundary; or the content of a
+    parenthesis right after the number ("63,1 MPa (Prognosewert)")."""
+    far: str = ""
+    """Earlier text of the same clause, before the previous number ("Der Beitrag des
+    Betonalters von 365 Tagen beträgt +9,5 MPa"); used only if ``before`` and ``after`` name
+    nothing relevant."""
     range_role: Literal["lower", "upper"] | None = None
 
 
@@ -162,7 +167,7 @@ _KNOWN_UNITS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^(MPa|N/mm²)$"), "MPa"),
     (re.compile(r"^kg/m³$"), "kg/m³"),
     (re.compile(r"^(%|Prozent)$"), "%"),
-    (re.compile(r"^(Pixel|px)$"), "px"),
+    (re.compile(r"^(Pixel\w*|px)$"), "px"),
     (re.compile(r"^(Tag|Tage|Tagen|Tages|d|tägig\w*|Tage-\w+|Tages\w+|tägige\w*)$"), "d"),
 )
 _OTHER_UNIT = re.compile(
@@ -176,6 +181,7 @@ _RANGE_GAP = re.compile(
 _AND_GAP = re.compile(r"^[ \u00a0\u202f\u2009]*und[ \u00a0\u202f\u2009]*$")
 _TIMES_GAP = re.compile(r"^[ \u00a0\u202f\u2009]*[x\u00d7][ \u00a0\u202f\u2009]*$")
 _BEFORE_BOUNDARY = re.compile(r"[.!?](?=\s)|[,;\n]|\bund\b|\bsowie\b")
+_PAREN_LABEL = re.compile(r"[ \u00a0]*\(([^()\d]{1,60})\)")
 _AFTER_BOUNDARY = re.compile(r"[.!?](?=\s|$)|[,;()\n]|\bund\b|\bsowie\b")
 _SIGN_CHARS = "+-\u2212\u2013"
 _SIGN_PRECEDERS = set(_SPACES + "\t\n([{:=/;")
@@ -430,6 +436,9 @@ def _number_tokens(text: str, original: str) -> list[NumberToken]:
         next_start = spans[index + 1].start if index + 1 < len(spans) else len(text)
         before_start = max(previous_end, _last_boundary(text, start))
         after_end = _next_boundary(text, unit_end, max(unit_end, next_start))
+        label = _PAREN_LABEL.match(text, unit_end)
+        after = label[1] if label else text[unit_end:after_end]
+        clause_start = _last_boundary(text, start)
         code = (
             sign is None and start > 0 and text[start - 1].isalpha() and text[start - 1] not in "xX"
         )
@@ -448,7 +457,8 @@ def _number_tokens(text: str, original: str) -> list[NumberToken]:
                 unit_text=unit_text,
                 code=code,
                 before=text[before_start:start],
-                after=text[unit_end:after_end],
+                after=after,
+                far=text[clause_start:before_start] if clause_start < before_start else "",
             )
         )
         previous_end = unit_end

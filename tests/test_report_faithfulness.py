@@ -67,6 +67,12 @@ def statuses(text: str, case: InspectionInput | None = None) -> list[str]:
         "Prüfung nach DIN EN 12390-3 oder an Bohrkernen nach DIN EN 12504-1.",
         "Fall PB-022, Bauteil Decke über EG, Feld C2, Bild IMG_0423.jpg, Modell resnet18.",
         "1. Zusammenfassung folgt.",
+        # fail-closed false positives found in the checker-v2 comparison, fixed in v3
+        "Das Bild hat eine Breite von 227 Pixeln und eine Höhe von 227 Pixeln.",
+        "Werte: 61,9 MPa (Prognosewert), 90 % (nominelle Überdeckung), 0,30 (w/z-Wert).",
+        "Der Beitrag des Betonalters von 28 Tagen beträgt \u22123,1 MPa.",
+        "Durch das Betonalter ergibt sich ein Rückgang von \u22123,1 MPa.",
+        "Die Prüfung betrifft die Decke über EG im Feld C2.",
     ],
 )
 def test_accepts_exact_bound_numbers(text: str) -> None:
@@ -293,3 +299,17 @@ def test_identifier_parts_are_masked_only_as_tokens() -> None:
     case = InspectionInput(case_id="PB-031", image=image, crack=crack())
     assert check_text("Bauteil Stütze 12", build_facts(case)).faithful
     assert statuses("Es wurden 12 Risse gefunden.", case) == ["invented"]
+
+
+def test_inflected_element_names_are_masked_by_word_pairs() -> None:
+    image = IMAGE.model_copy(update={"element": "Unterzug Ebene 2, Feld Süd"})
+    case = InspectionInput(case_id="PB-032", image=image, crack=crack())
+    assert check_text(
+        "Bewertet wurde ein Ausschnitt des Unterzuges Ebene 2.", build_facts(case)
+    ).faithful
+    assert statuses("Es wurden 2 Risse gefunden.", case) == ["invented"]
+
+
+def test_parenthesis_labels_and_far_context_still_bind_roles() -> None:
+    assert statuses("Werte: 69,6 MPa (Prognosewert).") == ["misattributed"]
+    assert statuses("Der Beitrag des Zements von 540 kg/m³ beträgt \u22123,1 MPa.") == ["ok", "ok"]
