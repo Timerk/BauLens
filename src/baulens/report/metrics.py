@@ -196,9 +196,13 @@ def save_figure(rows: Sequence[ModelMetrics], path: Path, *, subtitle: str) -> P
         for x, value in zip(offsets, values, strict=True):
             left.text(x, value + 1.5, f"{value:.0f}", ha="center", fontsize=8, color=_TEXT)
     if template is not None:
-        left.axhline(100, color=_BASELINE, linewidth=1, linestyle="--", zorder=1)
-        left.text(
-            len(metrics) - 0.5, 101.5, "template baseline", ha="right", fontsize=8, color=_MUTED
+        left.axhline(
+            100,
+            color=_BASELINE,
+            linewidth=1,
+            linestyle="--",
+            zorder=1,
+            label="template baseline (100 %)",
         )
     left.set_xticks(positions, [label for label, _ in metrics], fontsize=9, color=_TEXT)
     left.set_ylim(0, 112)
@@ -215,14 +219,14 @@ def save_figure(rows: Sequence[ModelMetrics], path: Path, *, subtitle: str) -> P
         right.plot([median, high], [y, y], color=color, linewidth=2, zorder=2)
         right.plot(median, y, "o", color=color, markersize=8, zorder=3)
         right.plot(high, y, "|", color=color, markersize=12, markeredgewidth=2, zorder=3)
-        right.text(high, y + 0.22, f"median {median:.0f} s · p95 {high:.0f} s", fontsize=8,
-                   color=_TEXT, ha="right")  # fmt: skip
+        label = f"median {median:.0f} s, p95 {high:.0f} s"
+        right.text(high * 1.03, y, label, fontsize=8, color=_TEXT, va="center")
     right.set_yticks(ys, names, fontsize=9, color=_TEXT)
     right.set_ylim(-0.6, len(llm_rows) - 0.3)
-    right.set_xlim(0, max(p95, default=1) * 1.1)
+    right.set_xlim(0, max(p95, default=1) * 1.75)
     right.invert_yaxis()
     right.set_xlabel("seconds per case (all calls)", fontsize=9, color=_MUTED)
-    right.set_title("Latency (CPU, shared load)", fontsize=11, color=_TEXT, loc="left")
+    right.set_title("Latency per case (CPU)", fontsize=11, color=_TEXT, loc="left")
 
     for axis in (left, right):
         axis.grid(axis="y" if axis is left else "x", color=_GRID, linewidth=0.8, zorder=0)
@@ -232,8 +236,8 @@ def save_figure(rows: Sequence[ModelMetrics], path: Path, *, subtitle: str) -> P
         for side in ("left", "bottom"):
             axis.spines[side].set_color(_GRID)
         axis.tick_params(colors=_MUTED, labelsize=8)
-    figure.suptitle(subtitle, fontsize=8, color=_MUTED, x=0.01, ha="left", y=0.02)
-    figure.tight_layout(rect=(0, 0.04, 1, 1))
+    figure.text(0.01, 0.015, subtitle, fontsize=8, color=_MUTED, ha="left")
+    figure.tight_layout(rect=(0, 0.06, 1, 1))
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=150, facecolor="white")
     plt.close(figure)
