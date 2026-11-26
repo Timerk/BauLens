@@ -1,11 +1,13 @@
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import BaseModel, ValidationError
 
 from baulens.config import (
     ApiConfig,
     CracksConfig,
+    PipelineConfig,
     ReportConfig,
     Settings,
     StrengthConfig,
@@ -48,3 +50,10 @@ def test_settings_load_ollama_environment(monkeypatch: pytest.MonkeyPatch) -> No
     settings = Settings()
     assert settings.ollama_host.host == "ollama"
     assert settings.llm_mode == "replay"
+
+
+def test_load_config_rejects_duplicate_keys(tmp_path: Path) -> None:
+    path = tmp_path / "duplicate.yaml"
+    path.write_text("seed: 1\nartifacts_dir: out\nseed: 2\n", encoding="utf-8")
+    with pytest.raises(yaml.YAMLError, match="duplicate key 'seed'"):
+        load_config(path, PipelineConfig)

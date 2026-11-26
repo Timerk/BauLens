@@ -1,7 +1,7 @@
 """Typed configuration for pipeline runs."""
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PositiveInt
@@ -56,7 +56,28 @@ class Settings(BaseSettings):
     llm_mode: Literal["live", "replay"] = Field(default="live", validation_alias="BAULENS_LLM_MODE")
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate mapping keys instead of keeping the last one."""
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
+        seen: set[Any] = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"found duplicate key {key!r}",
+                    key_node.start_mark,
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 def load_config[ConfigT: BaseModel](path: Path, model: type[ConfigT]) -> ConfigT:
-    """Read a checkout-relative or absolute YAML file and validate it against a model."""
+    """Read a checkout-relative or absolute YAML file and validate it against a model.
+
+    Duplicate keys raise ``yaml.YAMLError`` with the line of the repeated key.
+    """
     with project_path(path).open(encoding="utf-8") as config_file:
-        return model.model_validate(yaml.safe_load(config_file))
+        return model.model_validate(yaml.load(config_file, Loader=_UniqueKeyLoader))

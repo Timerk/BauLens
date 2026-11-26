@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from baulens.paths import RAW_DATA_DIR
@@ -52,4 +53,7 @@ def load_concrete(path: Path = DEFAULT_CONCRETE_PATH) -> pd.DataFrame:
         or not all(pd.api.types.is_numeric_dtype(dtype) for dtype in frame.dtypes)
     ):
         raise ValueError(f"Expected a complete numeric concrete table: {path}")
+    non_finite = [str(column) for column in frame.columns if not np.isfinite(frame[column]).all()]
+    if non_finite:
+        raise ValueError(f"Non-finite values in concrete table {path}: columns {non_finite}")
     return frame
