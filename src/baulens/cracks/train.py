@@ -83,7 +83,7 @@ def configure_runtime(config: CracksConfig) -> torch.device:
     return device
 
 
-def _run_epoch(
+def run_epoch(
     model: nn.Module,
     loader: DataLoader[Sample],
     device: torch.device,
@@ -183,9 +183,9 @@ def train(config: CracksConfig) -> TrainResult:
             epoch += 1
             epoch_start = time.perf_counter()
             set_train_mode(model, trainable)
-            train_loss, train_acc, _ = _run_epoch(model, train_loader, device, optimizer, scheduler)
+            train_loss, train_acc, _ = run_epoch(model, train_loader, device, optimizer, scheduler)
             model.eval()
-            val_loss, val_acc, val_f1 = _run_epoch(model, val_loader, device)
+            val_loss, val_acc, val_f1 = run_epoch(model, val_loader, device)
             history.append(
                 EpochLog(
                     phase=phase,

@@ -17,7 +17,8 @@ from baulens.cracks.metrics import (
     bootstrap_intervals,
     calibration,
     choose_threshold,
-    threshold_plateau,
+    leave_one_out_thresholds,
+    optimal_threshold_ranges,
 )
 from baulens.cracks.model import build_model, configure_trainable, gradcam_layer, resolve_device
 from baulens.cracks.robustness import default_corruptions
@@ -195,6 +196,34 @@ def test_group_bootstrap_resamples_whole_groups() -> None:
 def test_threshold_plateau_and_lower_edge_tie_break() -> None:
     labels = np.array([0, 0, 1, 1])
     probabilities = np.array([0.1, 0.7, 0.85, 0.95])
-    low, high = threshold_plateau(labels, probabilities, "f1")
-    assert (low, high) == (0.701, 0.85)
-    assert choose_threshold(labels, probabilities, "f1") == low
+    assert optimal_threshold_ranges(labels, probabilities, "f1") == [(0.701, 0.85)]
+    assert choose_threshold(labels, probabilities, "f1") == 0.701
+
+
+def test_exact_leave_one_out_includes_saturated_scores() -> None:
+    # Counterexample from review: restricting the probe to 0.001 < P < 0.999 misses 0.501.
+    labels = np.array([1, 0, 1, 0])
+    probabilities = np.array([0.0001, 0.5, 0.7, 0.9999])
+    loo = leave_one_out_thresholds(labels, probabilities, "f1")
+    for i in range(len(labels)):
+        keep = np.arange(len(labels)) != i
+        assert loo[i] == choose_threshold(labels[keep], probabilities[keep], "f1")
+    assert (loo.min(), loo.max()) == (0.5, 0.501)
+
+
+def test_optimal_ranges_are_contiguous_runs() -> None:
+    labels = np.array([1, 0, 1, 0, 1])
+    probabilities = np.array([0.3, 0.4, 0.6, 0.7, 0.9])
+    ranges = optimal_threshold_ranges(labels, probabilities, "f1")
+    assert all(low <= high for low, high in ranges)
+    assert all(ranges[i][1] < ranges[i + 1][0] for i in range(len(ranges) - 1))
+
+
+def test_evaluation_json_has_no_nan() -> None:
+    from baulens.cracks.evaluate import json_safe
+
+    assert json_safe({"a": float("nan"), "b": [1.0, float("inf")], "c": (0.5,)}) == {
+        "a": None,
+        "b": [1.0, None],
+        "c": [0.5],
+    }

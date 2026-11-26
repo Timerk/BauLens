@@ -10,6 +10,7 @@ from typing import Annotated, Never
 import typer
 from rich.console import Console
 
+from baulens.artifacts import ArtifactError
 from baulens.config import CracksConfig, StrengthConfig, load_config
 from baulens.data.download import DatasetError, DatasetName, download_dataset
 from baulens.paths import project_path
@@ -162,7 +163,7 @@ def cracks_evaluate(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
 
     try:
         result = asdict(evaluate(_cracks_config(config)))
-    except TrainingDataMismatchError as error:
+    except (TrainingDataMismatchError, ArtifactError) as error:
         typer.echo(f"Evaluation refused: {error}", err=True)
         raise typer.Exit(code=1) from error
     _echo_json({key: value for key, value in result.items() if key != "robustness"})
@@ -176,10 +177,24 @@ def cracks_export(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
 
     try:
         result = export(_cracks_config(config))
-    except (ExportError, TrainingDataMismatchError) as error:
+    except (ExportError, TrainingDataMismatchError, ArtifactError) as error:
         typer.echo(f"Export error: {error}", err=True)
         raise typer.Exit(code=1) from error
     _echo_json(asdict(result))
+
+
+@cracks_app.command("migrate")
+def cracks_migrate(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None:
+    """Publish a pre-generation checkpoint after verifying its provenance (one-off)."""
+    from baulens.cracks.metadata import LegacyMigrationError, TrainingDataMismatchError
+    from baulens.cracks.migrate import migrate_legacy
+
+    try:
+        record = migrate_legacy(_cracks_config(config))
+    except (LegacyMigrationError, TrainingDataMismatchError) as error:
+        typer.echo(f"Migration refused: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _echo_json(record)
 
 
 @cracks_app.command("benchmark")
@@ -190,7 +205,7 @@ def cracks_benchmark(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None
 
     try:
         result = benchmark(_cracks_config(config))
-    except TrainingDataMismatchError as error:
+    except (TrainingDataMismatchError, ArtifactError) as error:
         typer.echo(f"Benchmark refused: {error}", err=True)
         raise typer.Exit(code=1) from error
     _echo_json(asdict(result))

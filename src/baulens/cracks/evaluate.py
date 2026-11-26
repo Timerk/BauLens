@@ -1,8 +1,8 @@
 """Validation-chosen threshold, test metrics with bootstrap CIs, calibration, robustness probe,
 Grad-CAM galleries and the error gallery."""
 
-import json
 import logging
+import math
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 from PIL import Image
 from torch import nn
 
+from baulens.artifacts import write_json_atomic
 from baulens.config import CracksConfig
 from baulens.cracks import figures
 from baulens.cracks.data import (
@@ -23,21 +24,17 @@ from baulens.cracks.data import (
     stratified_head,
 )
 from baulens.cracks.gradcam import GradCAM, overlay_heatmap
-from baulens.cracks.metadata import (
-    ModelMetadata,
-    record_split_settings,
-    run_paths,
-    verify_training_data,
-)
+from baulens.cracks.metadata import load_published, publish_model, run_paths, verify_training_data
 from baulens.cracks.metrics import (
     binary_metrics,
     bootstrap_intervals,
     calibration,
     choose_threshold,
+    leave_one_out_thresholds,
     mean_confidence,
-    threshold_plateau,
+    optimal_threshold_ranges,
 )
-from baulens.cracks.model import build_model, gradcam_layer
+from baulens.cracks.model import gradcam_layer, model_from_weights
 from baulens.cracks.robustness import default_corruptions
 from baulens.cracks.splits import ensure_splits
 from baulens.cracks.train import configure_runtime
@@ -55,14 +52,6 @@ class EvaluationResult:
     test_ci95: dict[str, tuple[float, float]]
     test_ece: float
     robustness: list[dict[str, Any]]
-
-
-def load_torch_model(config: CracksConfig, device: torch.device) -> nn.Module:
-    paths = run_paths(config)
-    model = build_model(config.architecture, pretrained=False)
-    state = torch.load(paths.model, map_location="cpu", weights_only=True)
-    model.load_state_dict(state)
-    return model.to(device).eval()
 
 
 @torch.no_grad()
@@ -123,42 +112,6 @@ def _robustness(
     return rows
 
 
-def _leave_one_out_thresholds(
-    labels: NDArray[np.int64], probabilities: NDArray[np.float64], config: CracksConfig
-) -> dict[str, Any]:
-    """Threshold chosen after removing each single uncertain validation image.
-
-    Images with P below 0.001 or above 0.999 cannot move the optimum's edges, so only the
-    others are tried. Reports the range of resulting thresholds and which removal moves it.
-    """
-    candidates = np.flatnonzero((probabilities > 0.001) & (probabilities < 0.999))
-    chosen = []
-    for i in candidates:
-        keep = np.ones(len(labels), dtype=bool)
-        keep[i] = False
-        chosen.append(
-            choose_threshold(labels[keep], probabilities[keep], config.threshold_strategy)
-        )
-    values = np.array(chosen) if chosen else np.array([np.nan])
-    extremes: dict[str, dict[str, float | int]] = {}
-    if chosen:
-        for name, position in (
-            ("lowest", int(np.argmin(values))),
-            ("highest", int(np.argmax(values))),
-        ):
-            removed = int(candidates[position])
-            extremes[name] = {
-                "threshold": float(values[position]),
-                "removed_label": int(labels[removed]),
-                "removed_probability": round(float(probabilities[removed]), 6),
-            }
-    return {
-        "images_tried": len(candidates),
-        "min": float(np.nanmin(values)),
-        "max": float(np.nanmax(values)),
-    } | extremes
-
-
 def _gallery(
     model: nn.Module,
     config: CracksConfig,
@@ -194,12 +147,12 @@ def evaluate(config: CracksConfig) -> EvaluationResult:
     """Pick the threshold on validation, apply it once to test and write all evaluation output."""
     device = configure_runtime(config)
     paths = run_paths(config)
-    metadata = ModelMetadata.read(paths.model_dir)
+    published = load_published(paths.model_dir)
+    metadata = published.metadata
     manifest = ensure_splits(config)
     verify_training_data(metadata, manifest, config)
-    record_split_settings(metadata, config, paths.model_dir)
     data_dir = project_path(config.data_dir)
-    model = load_torch_model(config, device)
+    model = model_from_weights(metadata.architecture, published.weights, device)
     transform = EvalTransform(config.image_size)
 
     frames: dict[str, pd.DataFrame] = {}
@@ -224,8 +177,9 @@ def evaluate(config: CracksConfig) -> EvaluationResult:
     test_probs = frames["test"]["probability"].to_numpy()
     val_metrics = binary_metrics(val_labels, val_probs, threshold)
     test_metrics = binary_metrics(test_labels, test_probs, threshold)
-    plateau = threshold_plateau(val_labels, val_probs, config.threshold_strategy)
-    loo = _leave_one_out_thresholds(val_labels, val_probs, config)
+    plateau = optimal_threshold_ranges(val_labels, val_probs, config.threshold_strategy)
+    loo = leave_one_out_thresholds(val_labels, val_probs, config.threshold_strategy)
+    loo_counts = pd.Series(loo).value_counts().sort_index()
     image_intervals = bootstrap_intervals(
         test_labels,
         test_probs,
@@ -315,15 +269,20 @@ def evaluate(config: CracksConfig) -> EvaluationResult:
             k: (round(lo, 6), round(hi, 6)) for k, (lo, hi) in image_intervals.items()
         },
         "test_groups": int(frames["test"]["group"].nunique()),
-        "threshold_plateau": plateau,
-        "threshold_leave_one_out": loo,
+        "threshold_optimal_ranges": plateau,
+        "threshold_leave_one_out": {
+            "method": "exact, every validation image removed once",
+            "min": float(loo.min()),
+            "max": float(loo.max()),
+            "counts": {f"{t:.3f}": int(n) for t, n in loo_counts.items()},
+        },
         "val_ece": round(val_calibration.ece, 6),
         "test_calibration": asdict(test_calibration),
         "bootstrap_resamples": config.bootstrap_resamples,
         "val_images": len(frames["val"]),
         "test_images": len(frames["test"]),
     }
-    (paths.root / "evaluation.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    write_json_atomic(paths.root / "evaluation.json", json_safe(report))
     metadata.threshold = threshold
     metadata.threshold_strategy = config.threshold_strategy
     metadata.metrics = {
@@ -332,5 +291,19 @@ def evaluate(config: CracksConfig) -> EvaluationResult:
         "test_ci95": result.test_ci95,
         "test_ece": result.test_ece,
     }
-    metadata.write(paths.model_dir)
+    # A new threshold invalidates the graph's recorded label parity: publish weights and
+    # metadata as a new generation without a graph; `export` adds a checked graph.
+    metadata.onnx = {}
+    publish_model(paths.model_dir, metadata, published.weights)
     return result
+
+
+def json_safe(value: Any) -> Any:
+    """Replace NaN and infinities (e.g. AUC of a one-class subset) by JSON null."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [json_safe(item) for item in value]
+    return value

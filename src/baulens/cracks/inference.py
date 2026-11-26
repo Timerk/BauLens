@@ -14,8 +14,8 @@ from torch import nn
 
 from baulens.cracks.data import preprocess
 from baulens.cracks.gradcam import GradCAM, overlay_heatmap
-from baulens.cracks.metadata import MODEL_FILE, ONNX_FILE, ModelMetadata, file_sha256
-from baulens.cracks.model import build_model, gradcam_layer
+from baulens.cracks.metadata import PublishedModel, load_published
+from baulens.cracks.model import gradcam_layer, model_from_weights
 from baulens.schemas import CrackPrediction
 
 type Backend = Literal["onnx", "torch"]
@@ -32,36 +32,29 @@ class CrackClassifier:
     thread (see :class:`~baulens.cracks.gradcam.GradCAM`).
     """
 
-    def __init__(
-        self,
-        model_dir: Path,
-        metadata: ModelMetadata,
-        backend: Backend,
-        threads: int | None = None,
-    ) -> None:
+    def __init__(self, published: PublishedModel, backend: Backend, threads: int | None = None):
+        metadata = published.metadata
         if metadata.threshold is None:
-            raise ValueError(f"{model_dir} has no validation threshold; run evaluate first")
-        self.model_dir = model_dir
+            raise ValueError(f"{published.directory} has no validation threshold; run evaluate")
+        self.generation = published.directory
         self.metadata = metadata
         self.backend = backend
         self.threshold: float = metadata.threshold
         self._threads = threads
+        # Both backends are built from the verified bytes of the same generation.
+        self._weights = published.weights
         self._session: ort.InferenceSession | None = None
         self._torch: nn.Module | None = None
         self._cam: GradCAM | None = None
         self._init_lock = threading.Lock()
         if backend == "onnx":
-            expected = metadata.onnx.get("sha256")
-            if expected is None or file_sha256(model_dir / ONNX_FILE) != expected:
-                raise ValueError(
-                    f"{model_dir / ONNX_FILE} does not match the SHA-256 recorded by the last "
-                    "successful export; rerun `baulens cracks export`"
-                )
+            if published.onnx is None:
+                raise ValueError(f"{published.directory} has no ONNX graph; run export")
             options = ort.SessionOptions()
             if threads is not None:
                 options.intra_op_num_threads = threads
             self._session = ort.InferenceSession(
-                str(model_dir / ONNX_FILE), options, providers=["CPUExecutionProvider"]
+                published.onnx, options, providers=["CPUExecutionProvider"]
             )
         else:
             self._torch_model()
@@ -70,7 +63,12 @@ class CrackClassifier:
     def load(
         cls, model_dir: Path, backend: Backend = "onnx", threads: int | None = None
     ) -> "CrackClassifier":
-        return cls(model_dir, ModelMetadata.read(model_dir), backend, threads)
+        """Resolve ``model_dir/current.json`` once and load every file from that generation.
+
+        Raises :class:`~baulens.artifacts.ArtifactError` if any file does not match the
+        generation manifest or the digests recorded in its metadata.
+        """
+        return cls(load_published(model_dir, require_onnx=backend == "onnx"), backend, threads)
 
     @property
     def model_name(self) -> str:
@@ -85,12 +83,7 @@ class CrackClassifier:
             if self._torch is None:
                 if self._threads is not None:
                     torch.set_num_threads(self._threads)
-                model = build_model(self.metadata.architecture, pretrained=False)
-                state = torch.load(
-                    self.model_dir / MODEL_FILE, map_location="cpu", weights_only=True
-                )
-                model.load_state_dict(state)
-                self._torch = model.eval()
+                self._torch = model_from_weights(self.metadata.architecture, self._weights)
             return self._torch
 
     def _gradcam(self) -> GradCAM:

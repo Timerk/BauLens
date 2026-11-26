@@ -1,5 +1,7 @@
 """End-to-end smoke run of the crack pipeline on synthetic images (CPU, no network)."""
 
+import hashlib
+import io
 import json
 import shutil
 import threading
@@ -8,14 +10,18 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 import yaml
 from PIL import Image
 from typer.testing import CliRunner
 
+from baulens import artifacts
+from baulens.artifacts import ArtifactError
 from baulens.cli import app
 from baulens.config import CracksConfig, load_config
 from baulens.cracks import export as export_module
 from baulens.cracks.inference import CrackClassifier, overlay_heatmap
+from baulens.cracks.metadata import load_published
 from baulens.data.synthetic import make_synthetic_cracks
 from baulens.schemas import CrackPrediction
 
@@ -67,14 +73,20 @@ def test_split_is_grouped_and_complete(smoke_run: SmokeRun) -> None:
 
 @pytest.mark.smoke
 def test_training_writes_model_history_and_metadata(smoke_run: SmokeRun) -> None:
-    assert (smoke_run.model_dir / "model.pt").exists()
+    published = load_published(smoke_run.model_dir, require_onnx=True)
     assert (smoke_run.root / "history.csv").exists()
     assert (smoke_run.root / "figures" / "learning_curves.png").exists()
-    metadata = json.loads((smoke_run.model_dir / "metadata.json").read_text(encoding="utf-8"))
-    assert metadata["architecture"] == "resnet18"
-    assert metadata["pretrained_weights"] is None
-    assert len(metadata["data_checksum"]) == 64
-    assert 0 < metadata["threshold"] < 1
+    assert not (smoke_run.root / "checkpoint_in_progress.pt").exists()
+    metadata = published.metadata
+    assert metadata.architecture == "resnet18"
+    assert metadata.pretrained_weights is None
+    assert metadata.weights_sha256 == hashlib.sha256(published.weights).hexdigest()
+    assert metadata.split_settings is not None and metadata.split_settings["seed"] == 42
+    assert metadata.threshold is not None and 0 < metadata.threshold < 1
+    # train, evaluate and export each published a generation; two are kept.
+    pointer = json.loads((smoke_run.model_dir / "current.json").read_text(encoding="utf-8"))
+    assert len(pointer["generations"]) == 2
+    assert len(list((smoke_run.model_dir / "generations").iterdir())) == 2
 
 
 @pytest.mark.smoke
@@ -149,6 +161,14 @@ def test_evaluate_export_and_benchmark_refuse_a_different_split(
         assert "split checksum" in result.stderr
 
 
+def _snapshot(model_dir: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(model_dir)): path.read_bytes()
+        for path in sorted(model_dir.rglob("*"))
+        if path.is_file()
+    }
+
+
 @pytest.mark.smoke
 def test_failed_parity_keeps_the_published_model(
     smoke_run: SmokeRun, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -156,23 +176,103 @@ def test_failed_parity_keeps_the_published_model(
     config_path = _copy_run(smoke_run, tmp_path / "failing")
     config = load_config(config_path, CracksConfig)
     model_dir = config.artifacts_dir / "model"
-    before = {name: (model_dir / name).read_bytes() for name in ("model.onnx", "metadata.json")}
+    before = _snapshot(model_dir)
     monkeypatch.setattr(export_module, "parity", lambda *args: (1.0, 1.0, False))
     with pytest.raises(export_module.ExportError, match="left unchanged"):
         export_module.export(config)
-    for name, payload in before.items():
-        assert (model_dir / name).read_bytes() == payload
-    assert not list(model_dir.glob(".staging-*"))
+    assert _snapshot(model_dir) == before
     assert CrackClassifier.load(model_dir, "onnx").threshold > 0
 
 
 @pytest.mark.smoke
-def test_onnx_graph_not_matching_metadata_is_refused(smoke_run: SmokeRun, tmp_path: Path) -> None:
+def test_failed_pointer_write_keeps_the_previous_generation(
+    smoke_run: SmokeRun, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = _copy_run(smoke_run, tmp_path / "interrupted")
+    config = load_config(config_path, CracksConfig)
+    model_dir = config.artifacts_dir / "model"
+    before = _snapshot(model_dir)
+    real_write = artifacts.write_json_atomic
+
+    def failing_write(destination: Path, content: object) -> None:
+        if destination.name == artifacts.CURRENT_FILE:
+            raise OSError("simulated crash while switching the pointer")
+        real_write(destination, content)
+
+    monkeypatch.setattr(artifacts, "write_json_atomic", failing_write)
+    with pytest.raises(OSError, match="simulated crash"):
+        export_module.export(config)
+    assert _snapshot(model_dir) == before
+    assert CrackClassifier.load(model_dir, "onnx").predict(
+        Image.new("RGB", (64, 64), (128, 128, 128))
+    )
+
+
+@pytest.mark.smoke
+def test_tampered_generation_files_are_refused(smoke_run: SmokeRun, tmp_path: Path) -> None:
     config_path = _copy_run(smoke_run, tmp_path / "tampered")
     model_dir = load_config(config_path, CracksConfig).artifacts_dir / "model"
-    (model_dir / "model.onnx").write_bytes((model_dir / "model.onnx").read_bytes() + b"\0")
-    with pytest.raises(ValueError, match="SHA-256"):
+    generation = load_published(model_dir).directory
+    graph = generation / "model.onnx"
+    original = graph.read_bytes()
+    graph.write_bytes(original + b"\0")
+    with pytest.raises(ArtifactError, match="manifest"):
         CrackClassifier.load(model_dir, "onnx")
+    # A swapped graph with a consistently updated manifest still disagrees with the metadata.
+    manifest_path = generation / artifacts.MANIFEST_FILE
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["model.onnx"] = hashlib.sha256(graph.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ArtifactError, match=r"onnx.sha256"):
+        CrackClassifier.load(model_dir, "onnx")
+    # Same for swapped weights.
+    graph.write_bytes(original)
+    weights = generation / "model.pt"
+    weights.write_bytes(weights.read_bytes() + b"\0")
+    manifest["model.onnx"] = hashlib.sha256(original).hexdigest()
+    manifest["model.pt"] = hashlib.sha256(weights.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ArtifactError, match="weights_sha256"):
+        CrackClassifier.load(model_dir, "torch")
+
+
+def _legacy_run(smoke_run: SmokeRun, destination: Path, weights: bytes | None = None) -> Path:
+    """A run directory in the pre-generation layout, built from the published smoke model."""
+    config_path = _copy_run(smoke_run, destination)
+    model_dir = load_config(config_path, CracksConfig).artifacts_dir / "model"
+    published = load_published(model_dir)
+    shutil.rmtree(model_dir)
+    model_dir.mkdir()
+    metadata = published.metadata.model_copy(update={"weights_sha256": None})
+    (model_dir / "model.pt").write_bytes(published.weights if weights is None else weights)
+    (model_dir / "metadata.json").write_bytes(metadata.dump())
+    return config_path
+
+
+@pytest.mark.smoke
+def test_legacy_checkpoint_migrates_only_with_reproduced_validation_loss(
+    smoke_run: SmokeRun, tmp_path: Path
+) -> None:
+    config_path = _legacy_run(smoke_run, tmp_path / "legacy")
+    result = runner.invoke(app, ["cracks", "migrate", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+    model_dir = load_config(config_path, CracksConfig).artifacts_dir / "model"
+    assert CrackClassifier.load(model_dir, "torch").threshold > 0
+    assert not (model_dir / "model.pt").exists()
+
+    # Weights that are valid but not the trained ones (changed head bias) are refused.
+    state = torch.load(
+        io.BytesIO(load_published(model_dir).weights), map_location="cpu", weights_only=True
+    )
+    state["fc.bias"] = state["fc.bias"] + 20.0
+    buffer = io.BytesIO()
+    torch.save(state, buffer)
+    swapped = _legacy_run(smoke_run, tmp_path / "swapped", weights=buffer.getvalue())
+    result = runner.invoke(app, ["cracks", "migrate", "--config", str(swapped)])
+    assert result.exit_code == 1
+    assert "validation loss" in result.stderr
+    swapped_dir = load_config(swapped, CracksConfig).artifacts_dir / "model"
+    assert not (swapped_dir / "current.json").exists()
 
 
 @pytest.mark.smoke

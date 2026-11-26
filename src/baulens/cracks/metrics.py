@@ -40,15 +40,14 @@ def choose_threshold(
     """Best threshold on a 0.001 grid; ties go to the grid value closest to 0.5.
 
     With near-perfect separation a whole interval of thresholds shares the optimum (see
-    :func:`threshold_plateau`). The rule is a deterministic tie-break that prefers the
+    :func:`optimal_threshold_ranges`). The rule is a deterministic tie-break that prefers the
     conventional 0.5 when it is optimal. When the plateau lies entirely above (below) 0.5 it
     returns the plateau's lower (upper) edge, so the choice then depends on single
     validation images at that edge; report the plateau alongside the threshold.
     """
     tp, fp, fn, tn = _counts(labels, probabilities, THRESHOLD_GRID)
     score = _score(tp, fp, fn, tn, strategy)
-    best = np.flatnonzero(np.isclose(score, score.max(), rtol=0, atol=1e-12))
-    return float(THRESHOLD_GRID[best[np.argmin(np.abs(THRESHOLD_GRID[best] - 0.5))]])
+    return float(THRESHOLD_GRID[_pick(score)])
 
 
 def binary_metrics(
@@ -121,14 +120,48 @@ def bootstrap_intervals(
     }
 
 
-def threshold_plateau(
+def _pick(score: FloatArray) -> int:
+    """Index of the grid optimum, ties broken towards 0.5 (same rule as choose_threshold)."""
+    best = np.flatnonzero(np.isclose(score, score.max(), rtol=0, atol=1e-12))
+    return int(best[np.argmin(np.abs(THRESHOLD_GRID[best] - 0.5))])
+
+
+def optimal_threshold_ranges(
     labels: IntArray, probabilities: FloatArray, strategy: Literal["f1", "youden"]
-) -> tuple[float, float]:
-    """Lowest and highest grid threshold that attain the optimum (the plateau's edges)."""
+) -> list[tuple[float, float]]:
+    """Contiguous runs of grid thresholds that all attain the optimum, as (first, last).
+
+    Equal maxima can be separated by lower-scoring thresholds, so there may be several runs.
+    """
     tp, fp, fn, tn = _counts(labels, probabilities, THRESHOLD_GRID)
     score = _score(tp, fp, fn, tn, strategy)
-    best = THRESHOLD_GRID[np.isclose(score, score.max(), rtol=0, atol=1e-12)]
-    return float(best.min()), float(best.max())
+    optimal = np.isclose(score, score.max(), rtol=0, atol=1e-12)
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], optimal.astype(int), [0]])))
+    return [
+        (float(THRESHOLD_GRID[start]), float(THRESHOLD_GRID[stop - 1]))
+        for start, stop in zip(edges[::2], edges[1::2], strict=True)
+    ]
+
+
+def leave_one_out_thresholds(
+    labels: IntArray, probabilities: FloatArray, strategy: Literal["f1", "youden"]
+) -> FloatArray:
+    """Exact leave-one-out: the threshold chosen after removing each image in turn.
+
+    Uses the full-set confusion counts per grid threshold and subtracts each image's own
+    contribution, so all N refits cost O(N x grid) without re-counting.
+    """
+    tp, fp, fn, tn = _counts(labels, probabilities, THRESHOLD_GRID)
+    chosen = np.empty(len(labels), dtype=np.float64)
+    positive = labels.astype(bool)
+    for i in range(len(labels)):
+        predicted = (probabilities[i] >= THRESHOLD_GRID).astype(np.float64)
+        if positive[i]:
+            score = _score(tp - predicted, fp, fn - (1 - predicted), tn, strategy)
+        else:
+            score = _score(tp, fp - predicted, fn, tn - (1 - predicted), strategy)
+        chosen[i] = THRESHOLD_GRID[_pick(score)]
+    return chosen
 
 
 def mean_confidence(probabilities: FloatArray) -> float:
