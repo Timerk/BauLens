@@ -73,3 +73,22 @@ def both_case(**overrides: object) -> InspectionInput:
     return InspectionInput(
         case_id="PB-022", mix=MIX, strength=strength(**overrides), image=IMAGE, crack=crack()
     )
+
+
+def template_reply(case: InspectionInput, *, slots: bool = False, **changes: str) -> str:
+    """A model reply built from the template text; with ``slots`` every number is a placeholder."""
+    import json
+
+    from baulens.report.facts import build_facts
+    from baulens.report.template import template_draft
+
+    sheet = build_facts(case)
+    draft = template_draft(sheet).model_dump(exclude_none=True)
+    if slots:
+        for name, text in draft.items():
+            for fact in sorted(sheet.facts, key=lambda fact: len(fact.number), reverse=True):
+                for end in (" ", ")"):
+                    text = text.replace(fact.number + end, "{" + fact.slot + "}" + end)
+            draft[name] = text
+    draft.update(changes)
+    return json.dumps(draft, ensure_ascii=False)

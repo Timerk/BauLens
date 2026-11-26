@@ -7,7 +7,12 @@ models:
 temperature: 0.0
 max_tokens: 1024
 num_ctx: 4096
-prompt_template: report_v1
+generation_mode: slots
+compare_modes:
+  - free
+  - slots
+prompt_template: report_v2
+slot_prompt_template: report_slots_v1
 max_schema_retries: 1
 max_correction_retries: 1
 request_timeout_s: 600

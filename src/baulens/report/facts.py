@@ -1,24 +1,22 @@
-"""Citable facts of an inspection case, rendered once for the prompt and for the checker.
+"""Citable facts of an inspection case, rendered once for the prompt, the slots and the checker.
 
-Every number a report may contain comes from a :class:`Fact`. The prompt shows
-``Fact.display`` and the faithfulness checker accepts exactly the values listed in
-``Fact.renderings``, so what the model is shown and what the checker accepts cannot drift apart.
+Every number a report may contain comes from a :class:`Fact` and is accepted only in exactly
+the form shown to the model (``Fact.number``, German format, ROUND_HALF_UP). There is no
+rounding freedom. The only equivalent spellings are typographic: ``\u2212`` or ``-`` as minus and
+``1040``, ``1.040`` or ``1 040`` for the same digits.
 
-Permitted renderings (documented in ``docs/results/report.md``):
+Precision is chosen so that rendering cannot change a decision the input encodes: the crack
+probability gets as many decimals as needed to stay on the same side of the threshold and to
+differ from it (0.4999 against 0.5 renders as ``49,99 %`` against ``50 %``).
 
-* every value at the precision shown in the prompt, or numerically equal with trailing zeros
-  (``0,30`` for ``0,3``);
-* rounded to fewer decimals, down to ``Rendering.min_decimals``;
-* probabilities, the interval coverage and the decision threshold either as percent
-  (``93,1 %``) or as a fraction (``0,931``);
-* a rounding of the crack probability must not move it across the decision threshold;
-* signed feature contributions with their sign or as an absolute value without a sign
-  (German prose often carries the sign in the verb, "verringert um 3,1 MPa").
+Each fact also carries a *role* (what the number is, e.g. ``point`` or ``lower``) used by the
+checker to bind a number to the words around it, and a *slot* name used by the slot mode, in
+which the model writes ``{druckfestigkeit}`` and code inserts ``61,9 MPa``.
 """
 
 import re
 from dataclasses import dataclass
-from datetime import date, time
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import PurePath
 from typing import Literal
@@ -32,24 +30,12 @@ from baulens.schemas import (
 )
 
 UnitKind = Literal["MPa", "kg/m³", "d", "%", "px"]
-Quantity = Literal[
-    "strength",
-    "coverage",
-    "probability",
-    "threshold",
-    "ingredient",
-    "age",
-    "ratio",
-    "contribution",
-    "feature",
-    "pixels",
-]
 
 MINUS = "\u2212"
-MAX_INGREDIENT_DECIMALS = 1
 STRENGTH_DECIMALS = 1
-PERCENT_DECIMALS = 1
+MAX_INGREDIENT_DECIMALS = 2
 RATIO_DECIMALS = 2
+MAX_PERCENT_DECIMALS = 6
 
 MIX_LABELS: dict[str, str] = {
     "cement": "Zement",
@@ -60,6 +46,15 @@ MIX_LABELS: dict[str, str] = {
     "coarse_aggregate": "Grobe Gesteinskörnung",
     "fine_aggregate": "Feine Gesteinskörnung",
 }
+MIX_SLOTS: dict[str, str] = {
+    "cement": "zement",
+    "blast_furnace_slag": "huettensand",
+    "fly_ash": "flugasche",
+    "water": "wasser",
+    "superplasticizer": "fliessmittel",
+    "coarse_aggregate": "grobe_gesteinskoernung",
+    "fine_aggregate": "feine_gesteinskoernung",
+}
 _FEATURE_LABELS: dict[str, str] = {
     **MIX_LABELS,
     "age_days": "Betonalter",
@@ -69,40 +64,51 @@ _FEATURE_LABELS: dict[str, str] = {
     "water_binder_ratio": "w/b-Wert",
     "w_b_ratio": "w/b-Wert",
 }
-
-
-@dataclass(frozen=True)
-class Rendering:
-    """One accepted way to write a fact.
-
-    ``value`` is the value exactly as shown to the model with ``decimals`` digits after the
-    decimal separator. ``min_decimals`` is the coarsest rounding the checker accepts and
-    ``guard`` a boundary (the decision threshold) that a rounding must not cross.
-    """
-
-    value: Decimal
-    decimals: int
-    min_decimals: int
-    unit: UnitKind | None
-    guard: Decimal | None = None
+_RATIO_FEATURES = {"water_cement_ratio", "w_c_ratio"}
+_AGE_FEATURES = {"age", "age_days"}
 
 
 @dataclass(frozen=True)
 class Fact:
-    """A citable number from the input, addressed by its dotted field path."""
+    """A citable number, addressed by its dotted field path in the ``InspectionInput``."""
 
     field: str
     label: str
-    quantity: Quantity
+    role: str
+    value: Decimal
+    decimals: int
+    unit: UnitKind | None
+    number: str
+    """The number exactly as shown, e.g. ``61,9``, ``\u22123,1``, ``+5,2``."""
     display: str
-    renderings: tuple[Rendering, ...]
-    allow_unsigned: bool = False
+    """Number with unit, e.g. ``61,9 MPa``."""
+    slot: str
+    signed: bool = False
+
+
+@dataclass(frozen=True)
+class Identifier:
+    """A verbatim input string that may contain digits (case id, file, element, model).
+
+    ``labelled`` identifiers look like numbers (``123456``, ``999kg``) and are masked only
+    right after a label such as "Fall" or "Version"; all others are masked as whole tokens.
+    """
+
+    text: str
+    labelled: bool
+
+
+@dataclass(frozen=True)
+class TextSlot:
+    """A non-numeric slot (identifier, date or time) with its rendered text."""
+
+    slot: str
+    label: str
+    text: str
 
 
 @dataclass(frozen=True)
 class FactGroup:
-    """A titled block of fact lines in the prompt."""
-
     title: str
     lines: tuple[str, ...]
 
@@ -114,24 +120,30 @@ class FactSheet:
     case: InspectionInput
     facts: tuple[Fact, ...]
     groups: tuple[FactGroup, ...]
-    identifiers: tuple[str, ...]
-    versions: tuple[str, ...]
-    dates: frozenset[date]
-    times: frozenset[time]
+    identifiers: tuple[Identifier, ...]
+    text_slots: tuple[TextSlot, ...]
+    dates: tuple[str, ...]
+    times: tuple[str, ...]
 
     def fact(self, field: str) -> Fact | None:
         return next((fact for fact in self.facts if fact.field == field), None)
 
-    def has_quantity(self, quantity: Quantity) -> bool:
-        return any(fact.quantity == quantity for fact in self.facts)
+    def roles(self) -> set[str]:
+        return {fact.role for fact in self.facts}
+
+    def slots(self) -> dict[str, str]:
+        """Slot name to inserted text. A number slot inserts only the number; the model writes
+        the unit, and the checker verifies it like any other unit."""
+        rendered = {fact.slot: fact.number for fact in self.facts}
+        rendered.update({slot.slot: slot.text for slot in self.text_slots})
+        return rendered
 
     def render(self) -> str:
-        """Render the fact list exactly as it is shown to the model."""
-        blocks = []
-        for group in self.groups:
-            body = "\n".join(f"- {line}" for line in group.lines)
-            blocks.append(f"{group.title}:\n{body}")
-        return "\n\n".join(blocks)
+        """The fact list exactly as it is shown to the model in free-text mode."""
+        return "\n\n".join(
+            f"{group.title}:\n" + "\n".join(f"- {line}" for line in group.lines)
+            for group in self.groups
+        )
 
 
 def to_decimal(value: float) -> Decimal:
@@ -153,7 +165,7 @@ def shown_decimals(value: Decimal, max_decimals: int) -> int:
 
 
 def format_de(value: Decimal, decimals: int, *, signed: bool = False) -> str:
-    """German number format with decimal comma, typographic minus and no thousands separator."""
+    """German number format: decimal comma, typographic minus, no thousands separator."""
     rounded = quantize(value, decimals)
     digits = f"{abs(rounded):.{decimals}f}".replace(".", ",")
     if rounded < 0:
@@ -163,42 +175,46 @@ def format_de(value: Decimal, decimals: int, *, signed: bool = False) -> str:
     return digits
 
 
-def _scalar(
+_UNIT_SUFFIX: dict[UnitKind, str] = {"MPa": " MPa", "kg/m³": " kg/m³", "%": " %", "px": " Pixel"}
+
+
+def _fact(
     field: str,
     label: str,
-    quantity: Quantity,
+    role: str,
     value: Decimal,
-    *,
     decimals: int,
-    min_decimals: int,
     unit: UnitKind | None,
-    suffix: str,
+    slot: str,
+    *,
     signed: bool = False,
 ) -> Fact:
     shown = quantize(value, decimals)
-    display = format_de(shown, decimals, signed=signed) + suffix
-    rendering = Rendering(shown, decimals, min(min_decimals, decimals), unit)
-    return Fact(field, label, quantity, display, (rendering,), allow_unsigned=signed)
+    number = format_de(shown, decimals, signed=signed)
+    if unit == "d":
+        suffix = " Tag" if shown == 1 else " Tage"
+    else:
+        suffix = _UNIT_SUFFIX.get(unit, "") if unit is not None else ""
+    return Fact(field, label, role, shown, decimals, unit, number, number + suffix, slot, signed)
 
 
-def _fraction(
-    field: str, label: str, quantity: Quantity, value: float, guard: float | None = None
-) -> Fact:
-    """A fraction in [0, 1] offered as percent (shown) and as a decimal fraction."""
-    raw = to_decimal(value)
-    percent_decimals = shown_decimals(raw * 100, PERCENT_DECIMALS)
-    percent = quantize(raw * 100, percent_decimals)
-    fraction = quantize(raw, percent_decimals + 2)
-    guard_fraction = to_decimal(guard) if guard is not None else None
-    guard_percent = guard_fraction * 100 if guard_fraction is not None else None
-    renderings = (
-        Rendering(percent, percent_decimals, 0, "%", guard_percent),
-        Rendering(
-            fraction, percent_decimals + 2, min(2, percent_decimals + 2), None, guard_fraction
-        ),
-    )
-    display = f"{format_de(percent, percent_decimals)} %"
-    return Fact(field, label, quantity, display, renderings)
+def decision_preserving_percent(probability: float, threshold: float) -> tuple[int, int]:
+    """Decimals (in percent) for probability and threshold that keep the raw comparison.
+
+    The threshold is shown exactly (up to six percent decimals). The probability gets at least
+    one decimal and more until it falls on the same side of the shown threshold as the raw
+    value, and differs from it unless both are equal.
+    """
+    raw_p, raw_t = to_decimal(probability) * 100, to_decimal(threshold) * 100
+    t_decimals = shown_decimals(raw_t, MAX_PERCENT_DECIMALS)
+    shown_t = quantize(raw_t, t_decimals)
+    for p_decimals in range(1, MAX_PERCENT_DECIMALS + 1):
+        shown_p = quantize(raw_p, p_decimals)
+        same_side = (shown_p >= shown_t) == (raw_p >= raw_t)
+        distinct = (shown_p != shown_t) or (raw_p == raw_t)
+        if same_side and distinct:
+            return shown_decimals(shown_p, p_decimals), t_decimals
+    return MAX_PERCENT_DECIMALS, t_decimals
 
 
 def _mix_facts(mix: ConcreteMix) -> tuple[list[Fact], FactGroup]:
@@ -207,72 +223,139 @@ def _mix_facts(mix: ConcreteMix) -> tuple[list[Fact], FactGroup]:
     for name, label in MIX_LABELS.items():
         value = to_decimal(getattr(mix, name))
         decimals = shown_decimals(value, MAX_INGREDIENT_DECIMALS)
-        fact = _scalar(
-            f"mix.{name}",
-            label,
-            "ingredient",
-            value,
-            decimals=decimals,
-            min_decimals=0,
-            unit="kg/m³",
-            suffix=" kg/m³",
+        fact = _fact(
+            f"mix.{name}", label, f"ingredient:{name}", value, decimals, "kg/m³", MIX_SLOTS[name]
         )
         facts.append(fact)
         lines.append(f"{label}: {fact.display}")
-    ratio = _scalar(
+    ratio = _fact(
         "mix.water_cement_ratio",
         "w/z-Wert (Wasser/Zement, berechnet)",
         "ratio",
         to_decimal(mix.water) / to_decimal(mix.cement),
-        decimals=RATIO_DECIMALS,
-        min_decimals=RATIO_DECIMALS,
-        unit=None,
-        suffix="",
+        RATIO_DECIMALS,
+        None,
+        "wz_wert",
     )
-    age = _scalar(
+    age = _fact(
         "mix.age_days",
         "Betonalter bei Prüfung",
         "age",
         Decimal(mix.age_days),
-        decimals=0,
-        min_decimals=0,
-        unit="d",
-        suffix=" Tag" if mix.age_days == 1 else " Tage",
+        0,
+        "d",
+        "betonalter",
     )
     facts += [ratio, age]
     lines += [f"{ratio.label}: {ratio.display}", f"{age.label}: {age.display}"]
     return facts, FactGroup("Betonrezeptur (Massen je m³ Beton)", tuple(lines))
 
 
-def _feature_unit(feature: str, value: float) -> tuple[UnitKind | None, str]:
-    if feature in MIX_LABELS:
-        return "kg/m³", " kg/m³"
-    if feature in {"age", "age_days"}:
-        return "d", " Tag" if value == 1 else " Tage"
-    return None, ""
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
-def _strength_facts(strength: StrengthPrediction) -> tuple[list[Fact], FactGroup]:
-    def mpa(field: str, label: str, value: float) -> Fact:
-        return _scalar(
-            f"strength.{field}",
-            label,
-            "strength",
-            to_decimal(value),
-            decimals=STRENGTH_DECIMALS,
-            min_decimals=0,
-            unit="MPa",
-            suffix=" MPa",
+def _feature_facts(
+    strength: StrengthPrediction, existing: list[Fact]
+) -> tuple[list[Fact], list[str]]:
+    facts: list[Fact] = []
+    lines: list[str] = []
+    for index, item in enumerate(strength.top_features):
+        label = _FEATURE_LABELS.get(item.feature, item.feature)
+        slug = _slug(item.feature)
+        raw = to_decimal(item.value)
+        if item.feature in MIX_LABELS:
+            value = _fact(
+                f"strength.top_features[{index}].value",
+                f"Wert von {label}",
+                f"ingredient:{item.feature}",
+                raw,
+                shown_decimals(raw, MAX_INGREDIENT_DECIMALS),
+                "kg/m³",
+                f"wert_{slug}",
+            )
+        elif item.feature in _AGE_FEATURES:
+            value = _fact(
+                f"strength.top_features[{index}].value",
+                f"Wert von {label}",
+                "age",
+                raw,
+                0,
+                "d",
+                f"wert_{slug}",
+            )
+        else:
+            role = "ratio" if item.feature in _RATIO_FEATURES else f"feature:{item.feature}"
+            value = _fact(
+                f"strength.top_features[{index}].value",
+                f"Wert von {label}",
+                role,
+                raw,
+                RATIO_DECIMALS if role == "ratio" else shown_decimals(raw, RATIO_DECIMALS),
+                None,
+                f"wert_{slug}",
+            )
+        contribution = _fact(
+            f"strength.top_features[{index}].contribution_mpa",
+            f"Beitrag von {label}",
+            "contribution",
+            to_decimal(item.contribution_mpa),
+            STRENGTH_DECIMALS,
+            "MPa",
+            f"beitrag_{slug}",
+            signed=True,
+        )
+        # A feature value that renders like an existing fact of the same role adds nothing.
+        duplicate = any(
+            other.role == value.role and other.number == value.number for other in existing
+        )
+        if not duplicate:
+            facts.append(value)
+        facts.append(contribution)
+        lines.append(
+            f"Einflussgröße {label} (Wert {value.display}): Beitrag {contribution.display}"
+        )
+    return facts, lines
+
+
+def _strength_facts(
+    strength: StrengthPrediction, existing: list[Fact]
+) -> tuple[list[Fact], FactGroup]:
+    def mpa(field: str, label: str, role: str, value: float, slot: str) -> Fact:
+        return _fact(
+            f"strength.{field}", label, role, to_decimal(value), STRENGTH_DECIMALS, "MPa", slot
         )
 
-    point = mpa("point_mpa", "Prognostizierte Druckfestigkeit", strength.point_mpa)
-    lower = mpa("lower_mpa", "Untere Grenze des Prognoseintervalls", strength.lower_mpa)
-    upper = mpa("upper_mpa", "Obere Grenze des Prognoseintervalls", strength.upper_mpa)
-    coverage = _fraction(
+    point = mpa(
+        "point_mpa",
+        "Prognostizierte Druckfestigkeit",
+        "point",
+        strength.point_mpa,
+        "druckfestigkeit",
+    )
+    lower = mpa(
+        "lower_mpa",
+        "Untere Grenze des Prognoseintervalls",
+        "lower",
+        strength.lower_mpa,
+        "untere_grenze",
+    )
+    upper = mpa(
+        "upper_mpa",
+        "Obere Grenze des Prognoseintervalls",
+        "upper",
+        strength.upper_mpa,
+        "obere_grenze",
+    )
+    raw_coverage = to_decimal(strength.interval_coverage) * 100
+    coverage = _fact(
         "strength.interval_coverage",
-        "Nominelle Überdeckung",
+        "Nominelle Überdeckung des Prognoseintervalls",
         "coverage",
-        strength.interval_coverage,
+        raw_coverage,
+        shown_decimals(raw_coverage, MAX_PERCENT_DECIMALS),
+        "%",
+        "ueberdeckung",
     )
     facts = [point, lower, upper, coverage]
     domain = (
@@ -283,83 +366,56 @@ def _strength_facts(strength: StrengthPrediction) -> tuple[list[Fact], FactGroup
     lines = [
         f"Modell: {strength.model_name} (Version {strength.model_version})",
         f"{point.label}: {point.display}",
-        f"Prognoseintervall ({coverage.display} nominelle Überdeckung): "
-        f"{lower.display} bis {upper.display}",
+        f"{lower.label}: {lower.display}",
+        f"{upper.label}: {upper.display}",
+        f"{coverage.label}: {coverage.display}",
         f"Methode des Prognoseintervalls: {strength.interval_method}",
         f"Eingaben im Wertebereich der Trainingsdaten: {domain}",
     ]
-    for index, item in enumerate(strength.top_features):
-        label = _FEATURE_LABELS.get(item.feature, item.feature)
-        unit, suffix = _feature_unit(item.feature, item.value)
-        raw = to_decimal(item.value)
-        max_decimals = MAX_INGREDIENT_DECIMALS if unit is not None else RATIO_DECIMALS
-        value = _scalar(
-            f"strength.top_features[{index}].value",
-            f"Wert von {label}",
-            "feature",
-            raw,
-            decimals=shown_decimals(raw, max_decimals),
-            min_decimals=0 if unit is not None else max_decimals,
-            unit=unit,
-            suffix=suffix,
-        )
-        contribution = _scalar(
-            f"strength.top_features[{index}].contribution_mpa",
-            f"Beitrag von {label}",
-            "contribution",
-            to_decimal(item.contribution_mpa),
-            decimals=STRENGTH_DECIMALS,
-            min_decimals=0,
-            unit="MPa",
-            suffix=" MPa",
-            signed=True,
-        )
-        facts += [value, contribution]
-        lines.append(
-            f"Einflussgröße {label} (Wert {value.display}): Beitrag {contribution.display}"
-        )
-    return facts, FactGroup("Druckfestigkeitsprognose (Modellschätzung)", tuple(lines))
+    feature_facts, feature_lines = _feature_facts(strength, existing + facts)
+    return facts + feature_facts, FactGroup(
+        "Druckfestigkeitsprognose (Modellschätzung)", tuple(lines + feature_lines)
+    )
 
 
 def _crack_facts(
     crack: CrackPrediction, image: ImageMetadata | None
 ) -> tuple[list[Fact], FactGroup]:
-    probability = _fraction(
+    p_decimals, t_decimals = decision_preserving_percent(crack.crack_probability, crack.threshold)
+    probability = _fact(
         "crack.crack_probability",
         "Risswahrscheinlichkeit",
         "probability",
-        crack.crack_probability,
-        guard=crack.threshold,
+        to_decimal(crack.crack_probability) * 100,
+        p_decimals,
+        "%",
+        "risswahrscheinlichkeit",
     )
-    threshold = _fraction("crack.threshold", "Entscheidungsschwelle", "threshold", crack.threshold)
+    threshold = _fact(
+        "crack.threshold",
+        "Entscheidungsschwelle",
+        "threshold",
+        to_decimal(crack.threshold) * 100,
+        t_decimals,
+        "%",
+        "entscheidungsschwelle",
+    )
     facts = [probability, threshold]
     lines = [f"Modell: {crack.model_name} (Version {crack.model_version})"]
     if image is not None:
-        width = _scalar(
-            "image.width_px",
-            "Bildbreite",
-            "pixels",
-            Decimal(image.width_px),
-            decimals=0,
-            min_decimals=0,
-            unit="px",
-            suffix=" Pixel",
+        width = _fact(
+            "image.width_px", "Bildbreite", "pixels", Decimal(image.width_px), 0, "px", "bildbreite"
         )
-        height = _scalar(
-            "image.height_px",
-            "Bildhöhe",
-            "pixels",
-            Decimal(image.height_px),
-            decimals=0,
-            min_decimals=0,
-            unit="px",
-            suffix=" Pixel",
+        height = _fact(
+            "image.height_px", "Bildhöhe", "pixels", Decimal(image.height_px), 0, "px", "bildhoehe"
         )
         facts += [width, height]
-        lines.append(f"Bild: {image.filename} ({image.width_px} \u00d7 {image.height_px} Pixel)")
+        lines.append(f"Bild: {image.filename}, {width.number} \u00d7 {height.display}")
         if image.captured_at is not None:
-            moment = image.captured_at
-            lines.append(f"Aufnahmezeitpunkt: {moment:%d.%m.%Y}, {moment:%H:%M} Uhr")
+            lines.append(
+                f"Aufnahmezeitpunkt: {render_date(image.captured_at)}, "
+                f"{render_time(image.captured_at)} Uhr"
+            )
     result = "Riss erkannt" if crack.label == "crack" else "kein Riss erkannt"
     lines += [
         f"{probability.label}: {probability.display}",
@@ -370,7 +426,20 @@ def _crack_facts(
     return facts, FactGroup("Rissklassifikation (Bildausschnitt)", tuple(lines))
 
 
-def _identifier_strings(case: InspectionInput) -> list[str]:
+def render_date(moment: datetime) -> str:
+    return f"{moment:%d.%m.%Y}"
+
+
+def render_time(moment: datetime) -> str:
+    return f"{moment:%H:%M}" if moment.second == 0 else f"{moment:%H:%M:%S}"
+
+
+def _looks_numeric(text: str) -> bool:
+    """Identifiers that start with a digit could hide an amount ("999kg") when masked."""
+    return bool(re.match(r"[\d+\-\u2212.,]", text))
+
+
+def _identifiers(case: InspectionInput) -> list[Identifier]:
     values: list[str | None] = [case.case_id]
     if case.image is not None:
         values += [
@@ -389,50 +458,62 @@ def _identifier_strings(case: InspectionInput) -> list[str]:
     if case.crack is not None:
         values += [case.crack.model_name, case.crack.model_version]
     strings = [value for value in values if value and any(char.isdigit() for char in value)]
-    # Reports often quote only part of a free-text identifier ("Feld C2" from
-    # "Decke über EG, Feld C2"): also mask its comma-separated parts and its words that mix
-    # letters and digits. Pure digit words ("4") are never masked on their own.
-    for value in list(strings):
-        parts = [part.strip() for part in re.split(r"[,;()]", value)]
-        words = [word.strip(".,;()") for word in value.split()]
-        for piece in parts + words:
-            if any(c.isdigit() for c in piece) and any(c.isalpha() for c in piece):
-                strings.append(piece)
-    return list(dict.fromkeys(strings))
+    # Reports often quote part of a free-text element name ("Feld C2" from "Decke über EG,
+    # Feld C2"): also its comma-separated parts and its letter-led words with digits.
+    if case.image is not None and case.image.element:
+        element = case.image.element
+        parts = [part.strip() for part in re.split(r"[,;()]", element)]
+        words = [word.strip(".,;()") for word in element.split()]
+        strings += [
+            piece
+            for piece in parts + words
+            if any(c.isdigit() for c in piece) and piece[:1].isalpha()
+        ]
+    unique = list(dict.fromkeys(strings))
+    return [
+        Identifier(text, labelled=_looks_numeric(text) or not any(c.isalpha() for c in text))
+        for text in unique
+    ]
 
 
 def build_facts(case: InspectionInput) -> FactSheet:
-    """Collect the citable facts, identifiers and dates of one inspection case."""
+    """Collect the citable facts, identifiers, dates and slots of one inspection case."""
     facts: list[Fact] = []
     general = [f"Fall-ID: {case.case_id}"]
+    text_slots = [TextSlot("fall_id", "Fall-ID", case.case_id)]
     if case.image is not None and case.image.element:
         general.append(f"Bauteil: {case.image.element}")
+        text_slots.append(TextSlot("bauteil", "Bauteil", case.image.element))
     groups = [FactGroup("Allgemein", tuple(general))]
     if case.mix is not None:
         mix_facts, group = _mix_facts(case.mix)
         facts += mix_facts
         groups.append(group)
     if case.strength is not None:
-        strength_facts, group = _strength_facts(case.strength)
+        strength_facts, group = _strength_facts(case.strength, facts)
         facts += strength_facts
         groups.append(group)
+    dates: list[str] = []
+    times: list[str] = []
     if case.crack is not None:
         crack_facts, group = _crack_facts(case.crack, case.image)
         facts += crack_facts
         groups.append(group)
-
-    identifiers = _identifier_strings(case)
-    dates: set[date] = set()
-    times: set[time] = set()
-    if case.image is not None and case.image.captured_at is not None:
-        dates.add(case.image.captured_at.date())
-        times.add(case.image.captured_at.time().replace(second=0, microsecond=0))
+    if case.image is not None:
+        text_slots.append(TextSlot("bild", "Bilddatei", case.image.filename))
+        if case.image.captured_at is not None:
+            dates.append(render_date(case.image.captured_at))
+            times.append(render_time(case.image.captured_at))
+            text_slots += [
+                TextSlot("aufnahmedatum", "Aufnahmedatum", dates[0]),
+                TextSlot("aufnahmezeit", "Aufnahmezeit", times[0]),
+            ]
     return FactSheet(
         case=case,
         facts=tuple(facts),
         groups=tuple(groups),
-        identifiers=tuple(value for value in identifiers if any(c.isalpha() for c in value)),
-        versions=tuple(value for value in identifiers if not any(c.isalpha() for c in value)),
-        dates=frozenset(dates),
-        times=frozenset(times),
+        identifiers=tuple(_identifiers(case)),
+        text_slots=tuple(text_slots),
+        dates=tuple(dates),
+        times=tuple(times),
     )

@@ -12,7 +12,14 @@ from pydantic import ValidationError
 from rich.console import Console
 
 from baulens.artifacts import ArtifactError
-from baulens.config import CracksConfig, ReportConfig, Settings, StrengthConfig, load_config
+from baulens.config import (
+    CracksConfig,
+    GenerationMode,
+    ReportConfig,
+    Settings,
+    StrengthConfig,
+    load_config,
+)
 from baulens.data.download import DatasetError, DatasetName, download_dataset
 from baulens.paths import project_path
 from baulens.report.cases import CASES_SEED, generate_cases, load_cases, save_cases
@@ -217,6 +224,11 @@ def cracks_benchmark(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None
     _echo_json(asdict(result))
 
 
+class GenerationChoice(StrEnum):
+    SLOTS = "slots"
+    FREE = "free"
+
+
 class CompareSource(StrEnum):
     LIVE = "live"
     REPLAY = "replay"
@@ -260,6 +272,10 @@ def report_generate(
     mode: Annotated[
         ReportMode | None, typer.Option(help="live, replay or template; default BAULENS_LLM_MODE.")
     ] = None,
+    generation: Annotated[
+        GenerationChoice | None,
+        typer.Option(help="slots (numbers inserted by code) or free; default from config."),
+    ] = None,
     config_path: ReportConfigOption = Path("configs/report.yaml"),
     as_json: Annotated[bool, typer.Option("--json", help="Print the full ReportResult.")] = False,
 ) -> None:
@@ -269,12 +285,13 @@ def report_generate(
     case = _read_case(input_path)
     selected = mode or ReportMode(settings.llm_mode)
     model_name = model or config.models[0]
+    chosen: GenerationMode = generation.value if generation else config.generation_mode
     result: ReportResult
     if selected is ReportMode.TEMPLATE:
         result = generate_template(case, config=config)
     elif selected is ReportMode.REPLAY:
         replay = ReplayClient.from_directory(project_path(config.replay_dir), model_name)
-        result = generate_report(case, replay, config)
+        result = generate_report(case, replay, config, mode=chosen)
     else:
         client = OllamaClient(
             str(settings.ollama_host),
@@ -283,7 +300,7 @@ def report_generate(
             keep_alive=config.keep_alive,
         )
         try:
-            result = generate_report(case, client, config)
+            result = generate_report(case, client, config, mode=chosen)
         finally:
             client.close()
     console = Console()

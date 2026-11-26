@@ -5,7 +5,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from baulens.report.prompting import ChatMessage
 from baulens.report.schemas import LLMResponse, Source
@@ -44,7 +44,7 @@ class LLMClient(Protocol):
 
 
 def _int_or_none(value: object) -> int | None:
-    return value if isinstance(value, int) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 class OllamaClient:
@@ -118,19 +118,23 @@ class OllamaClient:
         message = data.get("message")
         if not isinstance(message, dict) or not isinstance(message.get("content"), str):
             raise LLMError("Ollama response has no message content")
-        return LLMResponse(
-            text=message["content"],
-            model=str(data.get("model", self._model)),
-            source="live",
-            done_reason=data.get("done_reason"),
-            latency_s=latency,
-            eval_count=_int_or_none(data.get("eval_count")),
-            eval_duration_ns=_int_or_none(data.get("eval_duration")),
-            prompt_eval_count=_int_or_none(data.get("prompt_eval_count")),
-            prompt_eval_duration_ns=_int_or_none(data.get("prompt_eval_duration")),
-            load_duration_ns=_int_or_none(data.get("load_duration")),
-            total_duration_ns=_int_or_none(data.get("total_duration")),
-        )
+        done_reason = data.get("done_reason")
+        try:
+            return LLMResponse(
+                text=message["content"],
+                model=str(data.get("model", self._model)),
+                source="live",
+                done_reason=done_reason if isinstance(done_reason, str) else None,
+                latency_s=latency,
+                eval_count=_int_or_none(data.get("eval_count")),
+                eval_duration_ns=_int_or_none(data.get("eval_duration")),
+                prompt_eval_count=_int_or_none(data.get("prompt_eval_count")),
+                prompt_eval_duration_ns=_int_or_none(data.get("prompt_eval_duration")),
+                load_duration_ns=_int_or_none(data.get("load_duration")),
+                total_duration_ns=_int_or_none(data.get("total_duration")),
+            )
+        except ValidationError as error:
+            raise LLMError(f"Ollama response metadata is invalid: {error}") from error
 
     def load(self) -> float:
         """Load the model into memory and return the reported load time in seconds."""

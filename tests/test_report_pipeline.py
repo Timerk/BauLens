@@ -7,18 +7,19 @@ from pathlib import Path
 
 import httpx
 import pytest
-from report_helpers import both_case, crack_case
+from report_helpers import both_case, crack_case, template_reply
 from typer.testing import CliRunner
 
 from baulens.cli import app
 from baulens.config import ReportConfig, load_config
 from baulens.report.cases import SCENARIOS, generate_cases, load_cases
 from baulens.report.clients import FakeClient, LLMError, OllamaClient
-from baulens.report.compare import DOC_BEGIN, DOC_END, resumable_metrics, run_comparison
+from baulens.report.compare import DOC_BEGIN, DOC_END, reusable, run_comparison
 from baulens.report.facts import build_facts
 from baulens.report.generate import generate_report, generation_options
+from baulens.report.metrics import compute_metrics
 from baulens.report.prompting import ChatMessage, initial_messages, load_prompt
-from baulens.report.replay import ReplayClient
+from baulens.report.replay import ReplayClient, load_records
 from baulens.report.template import template_draft
 from baulens.schemas import InspectionInput
 
@@ -148,24 +149,23 @@ def test_committed_replays_cover_every_case(model: str) -> None:
 
 
 def _scripted_reply(cases: list[InspectionInput]) -> FakeClient:
-    facts = {build_facts(case).render(): case for case in cases}
+    """Template-based replies for both modes; the first case first invents a number."""
 
     def reply(messages: Sequence[ChatMessage]) -> str:
-        case = next(c for rendered, c in facts.items() if rendered in messages[1].content)
-        draft = template_draft(build_facts(case)).model_dump(exclude_none=True)
-        if case.case_id == cases[0].case_id and len(messages) == 2:
-            draft["empfehlung"] += " Es sind 3 Bohrkerne zu entnehmen."
+        case = next(c for c in cases if c.case_id in messages[1].content)
+        slots = "Platzhalter" in messages[0].content
+        extra = (
+            " Es sind 3 Bohrkerne zu entnehmen." if case is cases[0] and len(messages) == 2 else ""
+        )
+        draft = json.loads(template_reply(case, slots=slots))
+        draft["empfehlung"] += extra
         return json.dumps(draft, ensure_ascii=False)
 
     return FakeClient(reply, model="fake:1b")
 
 
-@pytest.mark.smoke
-def test_compare_writes_results_replays_figure_and_doc(tmp_path: Path) -> None:
-    cases = load_cases(CASES_PATH)[:3]
-    doc = tmp_path / "report.md"
-    doc.write_text(f"# Results\n\n{DOC_BEGIN}\nold\n{DOC_END}\n", encoding="utf-8")
-    config = load_config(Path("configs/smoke/report.yaml"), ReportConfig).model_copy(
+def _smoke_config(tmp_path: Path, doc: Path | None = None) -> ReportConfig:
+    return load_config(Path("configs/smoke/report.yaml"), ReportConfig).model_copy(
         update={
             "artifacts_dir": tmp_path / "artifacts",
             "replay_dir": tmp_path / "replays",
@@ -173,22 +173,70 @@ def test_compare_writes_results_replays_figure_and_doc(tmp_path: Path) -> None:
             "figures_dir": tmp_path / "figures",
         }
     )
+
+
+@pytest.mark.smoke
+def test_compare_runs_both_modes_and_writes_outputs(tmp_path: Path) -> None:
+    cases = load_cases(CASES_PATH)[:3]
+    doc = tmp_path / "report.md"
+    doc.write_text("\n".join(["# Results", "", DOC_BEGIN, "old", DOC_END, ""]), encoding="utf-8")
+    config = _smoke_config(tmp_path, doc)
     run = run_comparison(
         config, cases, models=["fake:1b"], client_factory=lambda _: _scripted_reply(cases)
     )
-    fake, template = run.metrics
-    assert fake.cases == template.cases == 3
-    assert fake.faithful_initial == pytest.approx(2 / 3)
-    assert fake.faithful_final == 1.0
-    assert fake.violations_per_report["invented"] == pytest.approx(1 / 3)
-    assert template.faithful_initial == 1.0
+    free, slots, template = run.metrics
+    assert (free.mode, slots.mode, template.mode) == ("free", "slots", None)
+    for row in (free, slots):
+        assert row.cases == 3
+        assert row.faithful_initial == pytest.approx(2 / 3)
+        assert row.faithful_final == 1.0
+        assert row.violations_per_report["invented"] == pytest.approx(1 / 3)
+    assert template.faithful_initial == template.faithful_final == 1.0
     run_dir = Path(run.run_dir)
-    assert len((run_dir / "results_fake_1b.jsonl").read_text(encoding="utf-8").splitlines()) == 3
-    assert (tmp_path / "replays" / "fake_1b.jsonl").exists()
+    for mode in ("free", "slots"):
+        lines = (run_dir / f"results_fake_1b__{mode}.jsonl").read_text(encoding="utf-8")
+        assert len(lines.splitlines()) == 3
+    records = load_records(tmp_path / "replays" / "fake_1b.jsonl")
+    assert len(records) == 8  # 3 cases x 2 modes + one correction per mode
     assert (tmp_path / "figures" / "model_comparison.png").stat().st_size > 10_000
     text = doc.read_text(encoding="utf-8")
-    assert "old" not in text and "| fake:1b | 3 |" in text
-    assert resumable_metrics(run_dir, "fake:1b", cases) == fake
+    assert "old" not in text and "| fake:1b / slots | 3 |" in text
+    assert reusable(run_dir, "fake:1b", "slots", cases, config)[0] == slots
+
+
+@pytest.mark.smoke
+def test_resume_rejects_changed_inputs_and_settings(tmp_path: Path) -> None:
+    cases = load_cases(CASES_PATH)[:2]
+    config = _smoke_config(tmp_path).model_copy(update={"compare_modes": ["free"]})
+    run = run_comparison(
+        config, cases, models=["fake:1b"], client_factory=lambda _: _scripted_reply(cases)
+    )
+    run_dir = Path(run.run_dir)
+    assert reusable(run_dir, "fake:1b", "free", cases, config)[0] is not None
+    assert cases[0].mix is not None
+    changed_mix = cases[0].mix.model_copy(update={"cement": 950.0})
+    changed = [cases[0].model_copy(update={"mix": changed_mix}), cases[1]]
+    assert reusable(run_dir, "fake:1b", "free", changed, config) == (
+        None,
+        "inputs differs from the earlier run",
+    )
+    renamed = [cases[0].model_copy(update={"case_id": "PB-999"}), cases[1]]
+    assert reusable(run_dir, "fake:1b", "free", renamed, config)[0] is None
+    hotter = config.model_copy(update={"temperature": 0.7})
+    assert (
+        reusable(run_dir, "fake:1b", "free", cases, hotter)[1]
+        == "options differs from the earlier run"
+    )
+
+
+@pytest.mark.smoke
+def test_replay_misses_are_counted_separately() -> None:
+    cases = load_cases(CASES_PATH)[:2]
+    results = [generate_report(case, ReplayClient("none", []), CONFIG) for case in cases]
+    metrics = compute_metrics("none", results, mode="slots")
+    assert metrics.replay_misses == 2
+    assert metrics.schema_valid == metrics.faithful_initial == metrics.faithful_final == 0.0
+    assert metrics.completeness_mean is None and metrics.calls_per_case == 0.0
 
 
 @pytest.mark.smoke
@@ -236,7 +284,7 @@ def test_fake_generation_rejects_and_falls_back() -> None:
         {**template_draft(build_facts(case)).model_dump(exclude_none=True), "empfehlung": "C30/37"},
         ensure_ascii=False,
     )
-    result = generate_report(case, FakeClient([bad, bad]), CONFIG)
+    result = generate_report(case, FakeClient([bad, bad]), CONFIG, mode="free")
     assert result.status == "rejected" and result.delivered.generator == "template"
     assert {check.text for check in result.faithfulness.violations} == {"30", "37"}  # type: ignore[union-attr]
 

@@ -1,4 +1,8 @@
-"""Per-model metrics of a comparison run, the Markdown table and the summary figure."""
+"""Per-run metrics of a comparison, the Markdown tables and the summary figure.
+
+Rates count checker *detections* on the fixed synthetic suite: a draft is "faithful" when
+the checker found no violation in it, not when it is proven correct.
+"""
 
 import statistics
 from collections.abc import Callable, Sequence
@@ -8,7 +12,7 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from baulens.report.monitor import LoadSummary
-from baulens.report.schemas import VIOLATION_KINDS, ReportResult, ViolationKind
+from baulens.report.schemas import VIOLATION_KINDS, Mode, ReportResult, ViolationKind
 
 TEMPLATE_ROW = "template (no LLM)"
 
@@ -19,6 +23,7 @@ class ModelMetrics(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     model: str
+    mode: Mode | None
     cases: int
     schema_valid_first: float
     schema_valid: float
@@ -27,17 +32,23 @@ class ModelMetrics(BaseModel):
     rejected: int
     invalid: int
     errors: int
+    replay_misses: int
     violations_per_report: dict[ViolationKind, float]
     completeness_mean: float | None
     completeness_accepted_mean: float | None
     latency_median_s: float | None
     latency_p95_s: float | None
+    failed_call_s: float
     calls_per_case: float
     output_tokens_mean: float | None
     tokens_per_s: float | None
     load_time_s: float | None = None
     loaded_size_bytes: int | None = None
     load: LoadSummary | None = None
+
+    @property
+    def label(self) -> str:
+        return self.model if self.mode is None else f"{self.model} / {self.mode}"
 
 
 def _rate(values: Sequence[bool]) -> float:
@@ -48,15 +59,21 @@ def compute_metrics(
     model: str,
     results: Sequence[ReportResult],
     *,
+    mode: Mode | None = None,
+    baseline: bool = False,
     load: LoadSummary | None = None,
     load_time_s: float | None = None,
     loaded_size_bytes: int | None = None,
 ) -> ModelMetrics:
-    first_valid = [
-        bool(result.attempts) and result.attempts[0].schema_error is None for result in results
-    ]
-    if results and all(result.source == "template" for result in results):
-        first_valid = [True] * len(results)
+    """Aggregate per-case results. Only ``baseline=True`` credits template reports."""
+    if baseline:
+        first_valid = [result.status == "template" for result in results]
+        delivered_ok = first_valid
+    else:
+        first_valid = [
+            bool(result.attempts) and result.attempts[0].schema_error is None for result in results
+        ]
+        delivered_ok = [result.status == "accepted" for result in results]
     initial = [result.initial_faithfulness for result in results]
     drafted = [faith for faith in initial if faith is not None]
     violations = {
@@ -67,13 +84,20 @@ def compute_metrics(
         )
         for kind in VIOLATION_KINDS
     }
-    scores = [result.completeness.score for result in results if result.completeness is not None]
+    credited = {"template"} if baseline else {"accepted", "rejected"}
+    scores = [
+        result.completeness.score
+        for result in results
+        if result.completeness is not None and result.status in credited
+    ]
     accepted_scores = [
         result.completeness.score
         for result in results
-        if result.completeness is not None and result.status in {"accepted", "template"}
+        if result.completeness is not None
+        and result.status in ({"template"} if baseline else {"accepted"})
     ]
-    latencies = [result.latency_s for result in results]
+    answered = [result for result in results if result.attempts or baseline]
+    latencies = [result.latency_s for result in answered]
     responses = [attempt.response for result in results for attempt in result.attempts]
     eval_counts = [response.eval_count for response in responses if response.eval_count]
     durations = [
@@ -81,26 +105,32 @@ def compute_metrics(
         for response in responses
         if response.eval_count and response.eval_duration_ns
     ]
-    total_tokens = sum(count for count, _ in durations)
     total_seconds = sum(duration for _, duration in durations) / 1e9
     return ModelMetrics(
         model=model,
+        mode=mode,
         cases=len(results),
         schema_valid_first=_rate(first_valid),
         schema_valid=_rate([result.candidate is not None for result in results]),
-        faithful_initial=_rate([faith is not None and faith.faithful for faith in initial]),
-        faithful_final=_rate([result.status in {"accepted", "template"} for result in results]),
+        faithful_initial=_rate(
+            [baseline or (faith is not None and faith.faithful) for faith in initial]
+        ),
+        faithful_final=_rate(delivered_ok),
         rejected=sum(result.status == "rejected" for result in results),
         invalid=sum(result.status == "invalid" for result in results),
         errors=sum(result.status == "error" for result in results),
+        replay_misses=sum(result.status == "replay_miss" for result in results),
         violations_per_report=violations,
         completeness_mean=statistics.fmean(scores) if scores else None,
         completeness_accepted_mean=statistics.fmean(accepted_scores) if accepted_scores else None,
         latency_median_s=float(np.median(latencies)) if latencies else None,
         latency_p95_s=float(np.percentile(latencies, 95)) if latencies else None,
+        failed_call_s=sum(result.failed_call_s for result in results),
         calls_per_case=len(responses) / len(results) if results else 0.0,
         output_tokens_mean=statistics.fmean(eval_counts) if eval_counts else None,
-        tokens_per_s=total_tokens / total_seconds if total_seconds else None,
+        tokens_per_s=sum(count for count, _ in durations) / total_seconds
+        if total_seconds
+        else None,
         load_time_s=load_time_s,
         loaded_size_bytes=loaded_size_bytes,
         load=load,
@@ -122,23 +152,25 @@ def _gib(value: int | None) -> str:
 def metrics_table(rows: Sequence[ModelMetrics]) -> str:
     """Two Markdown tables: quality and resources."""
     quality = [
-        "| Model | Cases | Schema-valid (1st try / final) | Faithful before retry | "
-        "Faithful after retry | Rejected / invalid / error | Violations per draft "
-        "(invented / misattributed / rounding) | Completeness (all drafts / delivered) |",
+        "| Model / mode | Cases | Schema-valid (1st try / final) | No detected violation, "
+        "first draft | Accepted after retry | Rejected / invalid / error / replay miss "
+        "| Violations per first draft (invented / misattributed / inexact / unbound) "
+        "| Completeness (drafts / accepted) |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         v = row.violations_per_report
         quality.append(
-            f"| {row.model} | {row.cases} | {_percent(row.schema_valid_first)} / "
+            f"| {row.label} | {row.cases} | {_percent(row.schema_valid_first)} / "
             f"{_percent(row.schema_valid)} | {_percent(row.faithful_initial)} | "
-            f"{_percent(row.faithful_final)} | {row.rejected} / {row.invalid} / {row.errors} | "
-            f"{v['invented']:.2f} / {v['misattributed']:.2f} / {v['bad_rounding']:.2f} | "
-            f"{_number(row.completeness_mean, 2)} / {_number(row.completeness_accepted_mean, 2)} |"
+            f"{_percent(row.faithful_final)} | {row.rejected} / {row.invalid} / {row.errors} / "
+            f"{row.replay_misses} | {v['invented']:.2f} / {v['misattributed']:.2f} / "
+            f"{v['inexact']:.2f} / {v['unbound']:.2f} | {_number(row.completeness_mean, 2)} / "
+            f"{_number(row.completeness_accepted_mean, 2)} |"
         )
     resources = [
-        "| Model | Latency per case, median / p95 (s) | Calls per case | Output tokens per call "
-        "| Tokens/s | Load time (s) | Ollama model size (GiB) | Peak runner RSS (GiB) "
+        "| Model / mode | Latency per case, median / p95 (s) | Calls per case | Output tokens "
+        "per call | Tokens/s | Load time (s) | Ollama model size (GiB) | Peak runner RSS (GiB) "
         "| System CPU mean / max |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
@@ -152,7 +184,7 @@ def metrics_table(rows: Sequence[ModelMetrics]) -> str:
         rss = _gib(load.ollama_rss_peak_bytes) if load is not None else "-"
         digits = 3 if row.model == TEMPLATE_ROW else 1
         resources.append(
-            f"| {row.model} | {_number(row.latency_median_s, digits)} / "
+            f"| {row.label} | {_number(row.latency_median_s, digits)} / "
             f"{_number(row.latency_p95_s, digits)} | {row.calls_per_case:.2f} | "
             f"{_number(row.output_tokens_mean, 0)} | {_number(row.tokens_per_s, 1)} | "
             f"{_number(row.load_time_s, 1)} | {_gib(row.loaded_size_bytes)} | {rss} | {cpu} |"
@@ -160,7 +192,7 @@ def metrics_table(rows: Sequence[ModelMetrics]) -> str:
     return "\n".join(quality) + "\n\n" + "\n".join(resources) + "\n"
 
 
-# Reference categorical palette (dataviz skill), fixed order; neutral gray for the baseline.
+# Reference categorical palette (dataviz skill), fixed order per model; neutral baseline.
 _SERIES = ("#257de0", "#f47230", "#00b894", "#f2a600", "#ee7fac")
 _BASELINE = "#8c8c8c"
 _TEXT = "#191919"
@@ -169,63 +201,69 @@ _GRID = "#e6e6e6"
 
 
 def save_figure(rows: Sequence[ModelMetrics], path: Path, *, subtitle: str) -> Path:
-    """Rates per model (left) and latency (right); two panels, never a shared dual axis."""
+    """Rates per model and mode (left) and latency (right); two panels, no dual axis.
+
+    Colour identifies the model; the free-text mode is hatched, the slot mode solid.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     llm_rows = [row for row in rows if row.model != TEMPLATE_ROW]
-    template = next((row for row in rows if row.model == TEMPLATE_ROW), None)
+    models = list(dict.fromkeys(row.model for row in llm_rows))
+    colour = {model: _SERIES[index % len(_SERIES)] for index, model in enumerate(models)}
     metrics: list[tuple[str, Callable[[ModelMetrics], float]]] = [
         ("Schema-valid", lambda row: row.schema_valid),
-        ("Faithful,\nbefore retry", lambda row: row.faithful_initial),
-        ("Faithful,\nafter retry", lambda row: row.faithful_final),
+        ("No detected\nviolation (1st)", lambda row: row.faithful_initial),
+        ("Accepted\nafter retry", lambda row: row.faithful_final),
         ("Completeness\n(mean)", lambda row: row.completeness_mean or 0.0),
     ]
     figure, (left, right) = plt.subplots(
-        1, 2, figsize=(11, 4.2), gridspec_kw={"width_ratios": [2.4, 1]}
+        1, 2, figsize=(12, 4.8), gridspec_kw={"width_ratios": [2.4, 1]}
     )
-    width = 0.8 / max(len(llm_rows), 1)
+    width = 0.84 / max(len(llm_rows), 1)
     positions = np.arange(len(metrics))
     for index, row in enumerate(llm_rows):
         values = [100 * getter(row) for _, getter in metrics]
-        offsets = positions - 0.4 + width * (index + 0.5)
-        color = _SERIES[index % len(_SERIES)]
-        left.bar(offsets, values, width * 0.9, color=color, label=row.model, zorder=2)
-        for x, value in zip(offsets, values, strict=True):
-            left.text(x, value + 1.5, f"{value:.0f}", ha="center", fontsize=8, color=_TEXT)
-    if template is not None:
-        left.axhline(
-            100,
-            color=_BASELINE,
+        offsets = positions - 0.42 + width * (index + 0.5)
+        left.bar(
+            offsets,
+            values,
+            width * 0.88,
+            color=colour[row.model] if row.mode != "free" else "white",
+            edgecolor=colour[row.model],
+            hatch="////" if row.mode == "free" else None,
             linewidth=1,
-            linestyle="--",
-            zorder=1,
-            label="template baseline (100 %)",
+            label=row.label,
+            zorder=2,
         )
+        for x, value in zip(offsets, values, strict=True):
+            left.text(x, value + 1.5, f"{value:.0f}", ha="center", fontsize=6.5, color=_TEXT)
+    left.axhline(100, color=_BASELINE, linewidth=1, linestyle="--", zorder=1, label=TEMPLATE_ROW)
     left.set_xticks(positions, [label for label, _ in metrics], fontsize=9, color=_TEXT)
     left.set_ylim(0, 112)
     left.set_ylabel("% of cases (completeness: mean score x 100)", fontsize=9, color=_MUTED)
-    left.set_title("Report quality per model", fontsize=11, color=_TEXT, loc="left")
-    left.legend(frameon=False, fontsize=9, loc="upper left", bbox_to_anchor=(0, -0.14), ncol=4)
+    left.set_title("Checker results per model and mode", fontsize=11, color=_TEXT, loc="left")
+    left.legend(frameon=False, fontsize=8, loc="upper left", bbox_to_anchor=(0, -0.13), ncol=4)
 
-    names = [row.model for row in llm_rows]
     medians = [row.latency_median_s or 0.0 for row in llm_rows]
     p95 = [row.latency_p95_s or 0.0 for row in llm_rows]
     ys = np.arange(len(llm_rows))
-    for index, (y, median, high) in enumerate(zip(ys, medians, p95, strict=True)):
-        color = _SERIES[index % len(_SERIES)]
-        right.plot([median, high], [y, y], color=color, linewidth=2, zorder=2)
-        right.plot(median, y, "o", color=color, markersize=8, zorder=3)
-        right.plot(high, y, "|", color=color, markersize=12, markeredgewidth=2, zorder=3)
-        label = f"median {median:.0f} s, p95 {high:.0f} s"
-        right.text(high * 1.03, y, label, fontsize=8, color=_TEXT, va="center")
-    right.set_yticks(ys, names, fontsize=9, color=_TEXT)
-    right.set_ylim(-0.6, len(llm_rows) - 0.3)
-    right.set_xlim(0, max(p95, default=1) * 1.75)
+    for y, row, median, high in zip(ys, llm_rows, medians, p95, strict=True):
+        tone = colour[row.model]
+        right.plot([median, high], [y, y], color=tone, linewidth=2, zorder=2)
+        face = "white" if row.mode == "free" else tone
+        right.plot(median, y, "o", color=tone, markerfacecolor=face, markersize=8, zorder=3)
+        right.plot(high, y, "|", color=tone, markersize=12, markeredgewidth=2, zorder=3)
+        right.text(
+            high * 1.03, y, f"{median:.0f} s / {high:.0f} s", fontsize=8, color=_TEXT, va="center"
+        )
+    right.set_yticks(ys, [row.label for row in llm_rows], fontsize=8, color=_TEXT)
+    right.set_ylim(-0.6, len(llm_rows) - 0.4)
+    right.set_xlim(0, max(p95, default=1) * 1.6)
     right.invert_yaxis()
-    right.set_xlabel("seconds per case (all calls)", fontsize=9, color=_MUTED)
+    right.set_xlabel("seconds per case, median / p95 (all calls)", fontsize=9, color=_MUTED)
     right.set_title("Latency per case (CPU)", fontsize=11, color=_TEXT, loc="left")
 
     for axis in (left, right):
@@ -237,7 +275,7 @@ def save_figure(rows: Sequence[ModelMetrics], path: Path, *, subtitle: str) -> P
             axis.spines[side].set_color(_GRID)
         axis.tick_params(colors=_MUTED, labelsize=8)
     figure.text(0.01, 0.015, subtitle, fontsize=8, color=_MUTED, ha="left")
-    figure.tight_layout(rect=(0, 0.06, 1, 1))
+    figure.tight_layout(rect=(0, 0.05, 1, 1))
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=150, facecolor="white")
     plt.close(figure)

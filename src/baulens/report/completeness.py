@@ -39,7 +39,13 @@ _NO_CRACK = re.compile(
     r"|keine\s+Rissbildung|kein\w*\s+Hinweis\w*\s+auf\s+(\w+\s+){0,2}Riss",
     re.IGNORECASE,
 )
-_CRACK = re.compile(r"Riss", re.IGNORECASE)
+_CRACK = re.compile(
+    r"Riss\w*\s+(wurde\s+|wird\s+)?(erkannt|festgestellt|detektiert|nachgewiesen|identifiziert"
+    r"|vorhanden|angezeigt)|als\s+Riss\s+klassifiziert|als\s+rissbehaftet"
+    r"|weist\s+(\w+\s+){0,4}auf\s+(einen\s+)?Riss|Ergebnis\w*\s*(der\s+Klassifikation\s*)?:?\s*Riss",
+    re.IGNORECASE,
+)
+"""An explicit positive finding; a crack section that only lists numbers does not state one."""
 
 
 def _item(name: str, satisfied: bool, detail: str) -> CompletenessItem:
@@ -98,6 +104,7 @@ def check_completeness(
         fact_item("crack_threshold", "crack.threshold")
         finding = sections.get("rissbefund", "")
         negated = bool(_NO_CRACK.search(finding))
+        # The finding must be stated explicitly and match the label.
         consistent = (
             negated
             if case.crack.label == "no_crack"

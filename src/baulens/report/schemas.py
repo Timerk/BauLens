@@ -32,10 +32,11 @@ DISCLAIMER = (
 """Inserted by code, never generated. Deliberately free of numbers."""
 
 Source = Literal["live", "replay", "fake", "template"]
-Status = Literal["accepted", "rejected", "invalid", "error", "template"]
-CheckStatus = Literal["ok", "invented", "misattributed", "bad_rounding"]
-ViolationKind = Literal["invented", "misattributed", "bad_rounding"]
-VIOLATION_KINDS: tuple[ViolationKind, ...] = ("invented", "misattributed", "bad_rounding")
+Status = Literal["accepted", "rejected", "invalid", "error", "replay_miss", "template"]
+Mode = Literal["free", "slots"]
+CheckStatus = Literal["ok", "invented", "misattributed", "inexact", "unbound"]
+ViolationKind = Literal["invented", "misattributed", "inexact", "unbound"]
+VIOLATION_KINDS: tuple[ViolationKind, ...] = ("invented", "misattributed", "inexact", "unbound")
 
 
 class _Model(BaseModel):
@@ -67,12 +68,16 @@ class InspectionReport(_Model):
     disclaimer: str = DISCLAIMER
     generator: str = Field(description="Model name, or 'template' for the deterministic text")
     prompt_version: str | None = None
+    provenance: str = Field(
+        default="Vorlagenbericht ohne Sprachmodell",
+        description="Shown with the report: live model output, recorded replay or template",
+    )
 
     def to_markdown(self) -> str:
         lines = [f"# Prüfberichtsentwurf {self.case_id}", ""]
         for name, text in self.draft.sections().items():
             lines += [f"## {SECTION_TITLES[name]}", "", text.strip(), ""]
-        lines += [f"> {self.disclaimer}", "", f"_Erstellt mit: {self.generator}_"]
+        lines += [f"> {self.disclaimer}", "", f"_Herkunft: {self.provenance}_"]
         return "\n".join(lines) + "\n"
 
 
@@ -83,7 +88,7 @@ class NumberCheck(_Model):
     start: int
     end: int
     text: str
-    kind: Literal["number", "word", "date", "time", "reference"]
+    kind: Literal["number", "word", "date", "time", "reference", "slot"]
     value: str | None = None
     unit: str | None = None
     status: CheckStatus
@@ -168,6 +173,9 @@ class Attempt(_Model):
     response: LLMResponse
     schema_error: str | None = None
     violations: int | None = None
+    raw_draft: dict[str, str] | None = Field(
+        default=None, description="Slot mode: the draft with placeholders, before rendering"
+    )
 
 
 class ReportResult(_Model):
@@ -182,6 +190,7 @@ class ReportResult(_Model):
     input_sha256: str
     source: Source
     model: str | None
+    mode: Mode | None = None
     prompt_version: str
     status: Status
     delivered: InspectionReport
@@ -190,6 +199,7 @@ class ReportResult(_Model):
     faithfulness: FaithfulnessResult | None = None
     completeness: CompletenessResult | None = None
     attempts: list[Attempt] = Field(default_factory=list)
-    latency_s: float = 0.0
+    latency_s: float = Field(default=0.0, description="Sum over completed model calls")
+    failed_call_s: float = Field(default=0.0, description="Wall time of calls that failed")
     fallback_used: bool = False
     note: str | None = None

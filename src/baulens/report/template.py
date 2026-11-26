@@ -8,6 +8,7 @@ from baulens.report.facts import Fact, FactSheet
 from baulens.report.schemas import InspectionReport, ReportDraft
 
 TEMPLATE_GENERATOR = "template"
+TEMPLATE_PROVENANCE = "Vorlagenbericht ohne Sprachmodell"
 _BORDERLINE = 0.05
 
 
@@ -107,10 +108,15 @@ def template_draft(sheet: FactSheet) -> ReportDraft:
             "Risse an anderen Stellen nicht erfasst."
         )
 
-    limits.append(
-        "Dieser Entwurf ersetzt weder eine Druckfestigkeitsprüfung nach DIN EN 12390-3 noch eine "
-        "Sichtprüfung durch eine sachkundige Person vor Ort."
-    )
+    replaces = []
+    if strength is not None:
+        replaces.append("eine Druckfestigkeitsprüfung nach DIN EN 12390-3")
+    if crack is not None:
+        replaces.append("eine Sichtprüfung durch eine sachkundige Person vor Ort")
+    if len(replaces) == 2:
+        limits.append(f"Dieser Entwurf ersetzt weder {replaces[0]} noch {replaces[1]}.")
+    else:
+        limits.append(f"Dieser Entwurf ersetzt keine {replaces[0].removeprefix('eine ')}.")
     return ReportDraft(
         zusammenfassung=" ".join(summary),
         druckfestigkeit=strength_text,
@@ -122,5 +128,8 @@ def template_draft(sheet: FactSheet) -> ReportDraft:
 
 def template_report(sheet: FactSheet) -> InspectionReport:
     return InspectionReport(
-        case_id=sheet.case.case_id, draft=template_draft(sheet), generator=TEMPLATE_GENERATOR
+        case_id=sheet.case.case_id,
+        draft=template_draft(sheet),
+        generator=TEMPLATE_GENERATOR,
+        provenance=TEMPLATE_PROVENANCE,
     )

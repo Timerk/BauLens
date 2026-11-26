@@ -92,6 +92,13 @@ class CracksConfig(PipelineConfig):
         return self
 
 
+GenerationMode = Literal["free", "slots"]
+
+
+def _both_modes() -> list[GenerationMode]:
+    return ["free", "slots"]
+
+
 class ReportConfig(PipelineConfig):
     """Report generation and model comparison; ``seed`` is passed to the model as well."""
 
@@ -99,7 +106,10 @@ class ReportConfig(PipelineConfig):
     temperature: float = Field(ge=0, le=2)
     max_tokens: PositiveInt
     num_ctx: PositiveInt = 4096
-    prompt_template: str = Field(default="report_v1", pattern=r"^[a-z0-9_]+$")
+    generation_mode: GenerationMode = "slots"
+    compare_modes: list[GenerationMode] = Field(default_factory=_both_modes, min_length=1)
+    prompt_template: str = Field(default="report_v2", pattern=r"^[a-z0-9_]+$")
+    slot_prompt_template: str = Field(default="report_slots_v1", pattern=r"^[a-z0-9_]+$")
     max_schema_retries: int = Field(default=1, ge=0, le=3)
     max_correction_retries: int = Field(default=1, ge=0, le=3)
     request_timeout_s: float = Field(default=600.0, gt=0)

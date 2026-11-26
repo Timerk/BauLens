@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from report_helpers import both_case, crack_case, strength_case
+from report_helpers import both_case, crack_case, strength_case, template_reply
 
 from baulens.config import ReportConfig, load_config
 from baulens.report.clients import FakeClient, LLMError
@@ -38,6 +38,7 @@ from baulens.report.template import template_draft
 from baulens.schemas import InspectionInput
 
 CONFIG = load_config(Path("configs/report.yaml"), ReportConfig)
+FREE = CONFIG.model_copy(update={"generation_mode": "free"})
 
 
 def faithful_reply(case: InspectionInput, **changes: str) -> str:
@@ -54,7 +55,8 @@ def test_prompt_lists_the_facts_and_sections() -> None:
     assert "Risswahrscheinlichkeit: 93,1 %" in user.content
     assert "außerhalb des Wertebereichs der Trainingsdaten" in user.content
     assert "- rissbefund:" in user.content
-    assert load_prompt().prompt_version.startswith("report-v1+")
+    assert load_prompt().prompt_version.startswith("report-v2+")
+    assert "Alle Eingaben liegen im Wertebereich" not in user.content
 
 
 def test_schema_requires_exactly_the_sections_of_the_case() -> None:
@@ -95,7 +97,7 @@ def test_parse_draft_rejects_invalid_replies(text: str, message: str) -> None:
 def test_faithful_reply_is_accepted_and_delivered() -> None:
     case = both_case()
     client = FakeClient([faithful_reply(case)], model="fake-a")
-    result = generate_report(case, client, CONFIG)
+    result = generate_report(case, client, FREE)
     assert result.status == "accepted"
     assert result.source == "fake"
     assert result.delivered.generator == "fake-a"
@@ -110,7 +112,7 @@ def test_corrective_retry_lists_the_offending_numbers() -> None:
     case = both_case()
     bad = faithful_reply(case, empfehlung="Es sind 3 Bohrkerne nach 7 Tagen zu entnehmen.")
     client = FakeClient([bad, faithful_reply(case)])
-    result = generate_report(case, client, CONFIG)
+    result = generate_report(case, client, FREE)
     assert result.status == "accepted"
     assert [attempt.kind for attempt in result.attempts] == ["initial", "correction"]
     assert result.initial_faithfulness is not None
@@ -123,7 +125,7 @@ def test_corrective_retry_lists_the_offending_numbers() -> None:
 def test_persistently_unfaithful_report_is_rejected_never_delivered() -> None:
     case = strength_case()
     bad = faithful_reply(case, zusammenfassung="Die Druckfestigkeit beträgt 65,3 MPa.")
-    result = generate_report(case, FakeClient([bad, bad]), CONFIG)
+    result = generate_report(case, FakeClient([bad, bad]), FREE)
     assert result.status == "rejected"
     assert result.fallback_used
     assert result.delivered.generator == "template"
@@ -134,12 +136,12 @@ def test_persistently_unfaithful_report_is_rejected_never_delivered() -> None:
 
 def test_invalid_json_gets_one_schema_retry_then_fails_cleanly() -> None:
     case = crack_case()
-    recovered = generate_report(case, FakeClient(["{", faithful_reply(case)]), CONFIG)
+    recovered = generate_report(case, FakeClient(["{", faithful_reply(case)]), FREE)
     assert recovered.status == "accepted"
     assert [attempt.kind for attempt in recovered.attempts] == ["initial", "schema_retry"]
     assert recovered.attempts[0].schema_error is not None
 
-    failed = generate_report(case, FakeClient(["{", "{"]), CONFIG)
+    failed = generate_report(case, FakeClient(["{", "{"]), FREE)
     assert failed.status == "invalid"
     assert failed.candidate is None and failed.completeness is None
     assert failed.delivered.generator == "template"
@@ -148,7 +150,7 @@ def test_invalid_json_gets_one_schema_retry_then_fails_cleanly() -> None:
 def test_invalid_correction_keeps_the_rejection() -> None:
     case = crack_case()
     bad = faithful_reply(case, empfehlung="Wiederholung in 6 Monaten.")
-    result = generate_report(case, FakeClient([bad, "{", "{"]), CONFIG)
+    result = generate_report(case, FakeClient([bad, "{", "{"]), FREE)
     assert result.status == "rejected"
     assert [attempt.kind for attempt in result.attempts] == [
         "initial",
@@ -158,7 +160,7 @@ def test_invalid_correction_keeps_the_rejection() -> None:
 
 
 def test_service_errors_fall_back_to_the_template() -> None:
-    result = generate_report(crack_case(), FakeClient([]), CONFIG)
+    result = generate_report(crack_case(), FakeClient([]), FREE)
     assert result.status == "error"
     assert result.delivered.generator == "template"
     assert result.note is not None and "fehlgeschlagen" in result.note
@@ -204,7 +206,7 @@ def test_recorded_replies_replay_the_same_path(tmp_path: Path) -> None:
     case = both_case()
     bad = faithful_reply(case, empfehlung="Wiederholung in 6 Monaten.")
     recorder = RecordingClient(FakeClient([bad, faithful_reply(case)], model="m:1b"))
-    live = generate_report(case, recorder, CONFIG)
+    live = generate_report(case, recorder, FREE)
     path = replay_path(tmp_path, "m:1b")
     assert path.name == "m_1b.jsonl"
     write_records(path, recorder.records)
@@ -214,17 +216,20 @@ def test_recorded_replies_replay_the_same_path(tmp_path: Path) -> None:
     assert records[0].input_sha256 == input_sha256(case)
 
     replay = ReplayClient.from_directory(tmp_path, "m:1b")
-    replayed = generate_report(case, replay, CONFIG)
+    replayed = generate_report(case, replay, FREE)
     assert replayed.source == "replay"
     assert replayed.status == live.status == "accepted"
-    assert replayed.delivered == live.delivered
+    assert replayed.delivered.draft == live.delivered.draft
+    assert "Replay" in replayed.delivered.provenance
     assert [a.kind for a in replayed.attempts] == [a.kind for a in live.attempts]
 
 
 def test_unknown_input_in_replay_mode_falls_back_and_says_so(tmp_path: Path) -> None:
-    result = generate_report(crack_case(), ReplayClient.from_directory(tmp_path, "m"), CONFIG)
-    assert result.status == "template"
-    assert result.source == "template"
+    result = generate_report(crack_case(), ReplayClient.from_directory(tmp_path, "m"), FREE)
+    assert result.status == "replay_miss"
+    assert result.source == "replay"
+    assert result.fallback_used and result.delivered.generator == "template"
+    assert "Ersatz" in result.delivered.to_markdown()
     assert result.note is not None and "Keine aufgezeichnete Antwort" in result.note
 
 
@@ -253,3 +258,76 @@ def test_in_domain_case_must_not_be_declared_out_of_domain(sentence: str, consis
     result = check_completeness(report, check_sections(draft.sections(), sheet), sheet)
     item = next(item for item in result.items if item.name == "no_false_domain_warning")
     assert item.satisfied is consistent
+
+
+def slot_reply(case: InspectionInput, **changes: str) -> str:
+    return template_reply(case, slots=True, **changes)
+
+
+def test_slot_mode_inserts_numbers_by_code() -> None:
+    case = both_case()
+    reply = slot_reply(case)
+    assert "61,9" not in reply and "{druckfestigkeit} MPa" in reply
+    client = FakeClient([reply], model="fake-s")
+    result = generate_report(case, client, CONFIG)
+    assert CONFIG.generation_mode == "slots" and result.mode == "slots"
+    assert result.status == "accepted", result.faithfulness
+    assert "61,9 MPa" in result.delivered.draft.zusammenfassung
+    assert result.attempts[0].raw_draft is not None
+    assert "{druckfestigkeit}" in result.attempts[0].raw_draft["zusammenfassung"]
+    assert "{druckfestigkeit}" in client.calls[0][1].content
+    assert "Modus slots" in result.delivered.to_markdown()
+
+
+def test_slot_mode_rejects_literal_numbers_and_misplaced_slots() -> None:
+    case = strength_case()
+    literal = slot_reply(case, empfehlung="Es sind drei Bohrkerne nach 28 Tagen zu prüfen.")
+    corrected = generate_report(case, FakeClient([literal, slot_reply(case)]), CONFIG)
+    assert corrected.status == "accepted"
+    first = corrected.initial_faithfulness
+    assert first is not None
+    assert [check.reason for check in first.violations] == ["Zahl außerhalb eines Platzhalters"] * 2
+
+    misplaced = slot_reply(case, zusammenfassung="Die Druckfestigkeit beträgt {obere_grenze} MPa.")
+    rejected = generate_report(case, FakeClient([misplaced, misplaced]), CONFIG)
+    assert rejected.status == "rejected" and rejected.fallback_used
+    assert rejected.faithfulness is not None
+    assert [check.status for check in rejected.faithfulness.violations] == ["misattributed"]
+
+
+def test_delivered_markdown_carries_its_provenance(tmp_path: Path) -> None:
+    case = crack_case()
+    live = generate_report(case, FakeClient([faithful_reply(case)], model="m"), FREE)
+    assert "Testausgabe von m" in live.delivered.to_markdown()
+    template = generate_template(case).delivered.to_markdown()
+    assert "Herkunft: Vorlagenbericht ohne Sprachmodell" in template
+
+
+def test_replay_lookup_uses_the_full_input_identity(tmp_path: Path) -> None:
+    case = crack_case()
+    recorder = RecordingClient(FakeClient([slot_reply(case)], model="m"))
+    generate_report(case, recorder, CONFIG)
+    write_records(replay_path(tmp_path, "m"), recorder.records)
+    replay = ReplayClient.from_directory(tmp_path, "m")
+    assert generate_report(case, replay, CONFIG).status == "accepted"
+    assert case.image is not None
+    changed = case.model_copy(update={"image": case.image.model_copy(update={"sha256": "a" * 64})})
+    # Same messages (the hash is not in the prompt), but a different input: a miss.
+    assert initial_messages(build_facts(changed), load_prompt("report_slots_v1")) == (
+        initial_messages(build_facts(case), load_prompt("report_slots_v1"))
+    )
+    assert generate_report(changed, replay, CONFIG).status == "replay_miss"
+
+
+def test_crack_finding_must_be_stated_explicitly() -> None:
+    case = crack_case()
+    sheet = build_facts(case)
+    draft = template_draft(sheet).model_copy(
+        update={
+            "rissbefund": "Risswahrscheinlichkeit: 93,1 %. Entscheidungsschwelle: 50 %. "
+            "Einzelner Bildausschnitt."
+        }
+    )
+    report = InspectionReport(case_id=case.case_id, draft=draft, generator="fake")
+    result = check_completeness(report, check_sections(draft.sections(), sheet), sheet)
+    assert "crack_label" in result.missing and result.score < 1.0

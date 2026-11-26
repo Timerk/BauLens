@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from functools import cache
 from importlib import resources
@@ -17,11 +18,13 @@ from baulens.report.schemas import (
     MAX_SECTION_CHARS,
     SECTION_ORDER,
     FaithfulnessResult,
+    Mode,
     ReportDraft,
     SectionName,
 )
 
-DEFAULT_TEMPLATE = "report_v1"
+DEFAULT_TEMPLATE = "report_v2"
+DEFAULT_SLOT_TEMPLATE = "report_slots_v1"
 
 
 class ChatMessage(BaseModel):
@@ -39,6 +42,7 @@ class DraftError(ValueError):
 class PromptTemplate:
     name: str
     version: str
+    mode: Mode
     digest: str
     system: str
     user: str
@@ -61,6 +65,7 @@ def load_prompt(name: str = DEFAULT_TEMPLATE) -> PromptTemplate:
     return PromptTemplate(
         name=name,
         version=str(data["version"]),
+        mode="slots" if data.get("mode") == "slots" else "free",
         digest=hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest(),
         system=str(data["system"]).strip(),
         user=str(data["user"]).strip(),
@@ -96,12 +101,42 @@ def draft_schema(sheet: FactSheet) -> dict[str, Any]:
     }
 
 
+def _slot_lines(sheet: FactSheet) -> str:
+    lines = [
+        f"- {{{fact.slot}}}{fact.display.removeprefix(fact.number)} = {fact.display} ({fact.label})"
+        for fact in sheet.facts
+    ]
+    lines += [f"- {{{slot.slot}}} = {slot.text} ({slot.label})" for slot in sheet.text_slots]
+    return "\n".join(lines)
+
+
+_NUMERIC = re.compile(r"\d")
+
+
+def _info_lines(sheet: FactSheet) -> str:
+    """Fact-list lines without numbers (model names, domain flag, classification result)."""
+    lines = [
+        line
+        for group in sheet.groups
+        for line in group.lines
+        if not _NUMERIC.search(line.split(":", 1)[-1]) or line.startswith("Modell:")
+    ]
+    return "\n".join(f"- {line}" for line in lines)
+
+
 def initial_messages(sheet: FactSheet, prompt: PromptTemplate) -> list[ChatMessage]:
     lines = [f"- {name}: {prompt.sections[name]}" for name in required_sections(sheet)]
     sections = "\n".join(lines)
-    if sheet.case.strength is not None and not sheet.case.strength.in_training_domain:
-        sections += "\n\n" + prompt.notes["out_of_domain"]
-    user = Template(prompt.user).substitute(facts=sheet.render(), sections=sections)
+    if sheet.case.strength is not None:
+        note = "in_domain" if sheet.case.strength.in_training_domain else "out_of_domain"
+        sections += "\n\n" + prompt.notes[note]
+    template = Template(prompt.user)
+    if prompt.mode == "slots":
+        user = template.substitute(
+            slots=_slot_lines(sheet), info=_info_lines(sheet), sections=sections
+        )
+    else:
+        user = template.substitute(facts=sheet.render(), sections=sections)
     return [
         ChatMessage(role="system", content=prompt.system),
         ChatMessage(role="user", content=user),

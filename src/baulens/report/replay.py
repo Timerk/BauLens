@@ -1,9 +1,10 @@
 """Record model replies and serve them again without a model (public demo, CI).
 
 A replay file ``data/report_replays/<model>.jsonl`` holds one :class:`ReplayRecord` per model
-call. Records are keyed by the SHA-256 of the exact chat messages and JSON schema, which
-already contain the case facts and the prompt version; ``case_id``, ``input_sha256`` and
-``prompt_version`` are stored as well so the file stays readable and auditable. Because
+call, for both generation modes. Records are keyed by the SHA-256 of the model, the full
+input digest (including fields the prompt does not show, such as the image hash), the prompt
+version, the exact chat messages and the JSON schema. ``case_id``, ``input_sha256`` and
+``prompt_version`` are stored in clear as well so the file stays auditable. Because
 decoding runs with temperature 0 and a fixed seed, replaying the recorded replies walks the
 same path through :func:`baulens.report.generate.generate_report` as the live run, including
 corrective retries.
@@ -38,9 +39,19 @@ class ReplayRecord(BaseModel):
     response: LLMResponse
 
 
-def request_key(model: str, messages: Sequence[ChatMessage], schema: dict[str, Any]) -> str:
+def request_key(
+    model: str,
+    messages: Sequence[ChatMessage],
+    schema: dict[str, Any],
+    *,
+    input_sha256: str,
+    prompt_version: str,
+) -> str:
+    """Key of one model call: the exact input (incl. image hash), prompt, messages and schema."""
     payload = {
         "model": model,
+        "input_sha256": input_sha256,
+        "prompt_version": prompt_version,
         "messages": [message.model_dump() for message in messages],
         "schema": schema,
     }
@@ -70,6 +81,7 @@ class ReplayClient:
     """Serves recorded replies; raises :class:`ReplayMissError` for anything unrecorded."""
 
     def __init__(self, model: str, records: Sequence[ReplayRecord]) -> None:
+        self._case: tuple[str, str, str] | None = None
         self._model = model
         self._records = {record.key: record for record in records if record.model == model}
 
@@ -86,6 +98,9 @@ class ReplayClient:
     def source(self) -> Source:
         return "replay"
 
+    def begin_case(self, case_id: str, input_sha256: str, prompt_version: str) -> None:
+        self._case = (case_id, input_sha256, prompt_version)
+
     def __len__(self) -> int:
         return len(self._records)
 
@@ -95,7 +110,17 @@ class ReplayClient:
         schema: dict[str, Any],
         options: GenerationOptions,
     ) -> LLMResponse:
-        record = self._records.get(request_key(self._model, messages, schema))
+        if self._case is None:
+            raise ReplayMissError("no case context; call begin_case() first")
+        _, input_sha256, prompt_version = self._case
+        key = request_key(
+            self._model,
+            messages,
+            schema,
+            input_sha256=input_sha256,
+            prompt_version=prompt_version,
+        )
+        record = self._records.get(key)
         if record is None:
             raise ReplayMissError(f"no recorded reply of {self._model} for this input")
         return record.response.model_copy(update={"source": "replay"})
@@ -130,11 +155,17 @@ class RecordingClient:
     ) -> LLMResponse:
         if self._case is None:
             raise RuntimeError("call begin_case() before recording")
-        response = self._inner.generate(messages, schema, options)
         case_id, input_sha256, prompt_version = self._case
+        response = self._inner.generate(messages, schema, options)
         self.records.append(
             ReplayRecord(
-                key=request_key(self.model, messages, schema),
+                key=request_key(
+                    self.model,
+                    messages,
+                    schema,
+                    input_sha256=input_sha256,
+                    prompt_version=prompt_version,
+                ),
                 model=self.model,
                 case_id=case_id,
                 input_sha256=input_sha256,
