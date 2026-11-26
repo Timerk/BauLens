@@ -56,9 +56,6 @@ def test_data_download_reports_a_clear_error(monkeypatch: pytest.MonkeyPatch) ->
 @pytest.mark.parametrize(
     ("group", "command", "milestone"),
     [
-        ("cracks", "train", 3),
-        ("cracks", "evaluate", 3),
-        ("cracks", "export", 3),
         ("report", "generate", 4),
         ("report", "compare", 4),
     ],
