@@ -100,6 +100,7 @@ def _robustness(
             | {k: round(metrics[k], 4) for k in ("accuracy", "precision", "recall", "f1")}
             | {
                 "roc_auc": round(metrics["roc_auc"], 6),
+                "roc_auc_exactly_one": bool(metrics["roc_auc"] == 1.0),
                 "mean_confidence": round(mean_confidence(probabilities), 4),
                 "ece": round(calibration(labels, probabilities, config.calibration_bins).ece, 5),
             }
