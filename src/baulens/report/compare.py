@@ -317,7 +317,7 @@ def summary_block(run: ComparisonRun) -> str:
         f"prompts {prompts}, checker v{info.checker_version}, Ollama "
         f"{info.ollama_version or 'n/a'}, {info.machine}, {info.logical_cpus} logical CPUs, "
         f"{info.memory_gib:.0f} GiB RAM, system CPU load {info.cpu_before_percent:.0f} % "
-        "before the run"
+        "before this invocation"
     ]
     if info.cpu_before_percent >= SHARED_LOAD_PERCENT:
         notes.append("measured under shared load, so latencies are pessimistic")
@@ -327,7 +327,13 @@ def summary_block(run: ComparisonRun) -> str:
             "resource columns are not measured"
         )
     if info.reused:
-        notes.append("reused from an earlier identical run: " + ", ".join(info.reused))
+        notes.append(
+            "results of "
+            + ", ".join(info.reused)
+            + " come from earlier invocations into the same run directory and were reused "
+            "after manifest validation (inputs, prompts, checker, options); resource columns "
+            "were measured during those invocations"
+        )
     return "; ".join(notes) + "._\n\n" + metrics_table(run.metrics)
 
 
