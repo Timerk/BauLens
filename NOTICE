@@ -1,0 +1,15 @@
+BauLens dataset attribution
+
+Concrete Compressive Strength [Dataset], I-Cheng Yeh (1998), UCI Machine Learning Repository.
+https://doi.org/10.24432/C5PK67
+Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+The included tests/fixtures/concrete_sample.csv contains 60 rows sampled from the
+workbook. BauLens exported the subset to CSV and renamed its columns.
+
+Concrete Crack Images for Classification [Dataset, version 2], Çağlar Fırat Özgenel
+(2019), Mendeley Data. https://doi.org/10.17632/5y9wdsg2zt.2
+Licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+The data record requests citation of Ç. F. Özgenel and A. Gönenç Sorguç (2018),
+Performance Comparison of Pretrained Convolutional Neural Networks on Crack
+Detection in Buildings, ISARC 2018, https://doi.org/10.22260/ISARC2018/0094.
+BauLens fetches the original archive on demand.
