@@ -52,11 +52,18 @@ flowchart LR
 | `GET /api/v1/health` | – | readiness and model version per component, LLM mode |
 | `GET /api/v1/models` | – | versions, test metrics, training-domain ranges |
 | `POST /api/v1/strength/predict` | `ConcreteMix` | `StrengthPrediction` |
-| `POST /api/v1/cracks/predict?gradcam=true` | multipart `file` (JPEG/PNG ≤ 10 MB) | `CrackPrediction`, `ImageMetadata`, optional Grad-CAM PNG |
+| `POST /api/v1/cracks/predict?gradcam=true` | multipart `file` (JPEG/PNG ≤ 10 MB) | `CrackPrediction`, `ImageMetadata`; with `gradcam=true` an upright preview and a Grad-CAM overlay of the same size |
 | `POST /api/v1/report` | `InspectionInput`, `source` (`live`/`replay`/`template`) | report envelope with checks |
 | `GET /api/v1/report/cases` | – | recorded cases that `replay` can serve |
 
 The interactive OpenAPI documentation is served at `/api/v1/docs`.
+
+Uploaded images must be JPEG or PNG, and the declared type must match the content. The pixel
+count is checked from the header before any decoding. Images reach the model as upright
+8-bit RGB: 16-bit greyscale is scaled linearly to 8 bit, transparency (alpha or a palette
+transparency entry) is composited on white, and other modes are rejected with 415. The full
+contract is in [`uploads.py`](../src/baulens/api/uploads.py). Error responses never contain
+artifact paths or exception text; the cause is logged server-side under the request id.
 
 ## Report flow
 
