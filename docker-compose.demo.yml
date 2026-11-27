@@ -1,0 +1,10 @@
+# Demo mode: recorded report output only ("replay"), no Ollama container.
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build
+services:
+  api:
+    environment:
+      BAULENS_LLM_MODE: replay
+  ollama:
+    profiles: ["llm"]
+  ollama-pull:
+    profiles: ["llm"]

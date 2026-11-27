@@ -15,4 +15,7 @@ Detection in Buildings, ISARC 2018, https://doi.org/10.22260/ISARC2018/0094.
 It also lists L. Zhang, F. Yang, Y. D. Zhang and Y. J. Zhu (2016), Road Crack
 Detection Using Deep Convolutional Neural Network, ICIP 2016,
 https://doi.org/10.1109/ICIP.2016.7533052.
-BauLens fetches the original archive on demand.
+BauLens fetches the original archive on demand. The four example images in
+apps/dashboard/examples/ are unmodified copies of Positive/16450_1.jpg,
+Positive/06611.jpg, Negative/00346.jpg and Negative/16584.jpg from this dataset;
+only the file names were changed.

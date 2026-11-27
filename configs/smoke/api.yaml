@@ -1,3 +1,13 @@
+# Offline API settings for tests; the fixtures point artifacts_dir at temporary models.
 host: 127.0.0.1
 port: 8000
-artifacts_dir: artifacts
+artifacts_dir: artifacts/smoke-api
+cracks_backend: onnx
+inference_threads: 1
+max_upload_bytes: 1048576
+max_image_pixels: 4000000
+gradcam_max_side: 256
+cors_origins:
+  - http://localhost:8501
+report_config: configs/smoke/report.yaml
+log_level: WARNING

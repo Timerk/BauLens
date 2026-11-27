@@ -1,0 +1,12 @@
+# Allow-list: only what the images need. Data, artifacts, .venv and .git stay out.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src/
+!configs/
+!apps/dashboard/
+!data/report_replays/
+**/__pycache__
+**/*.py[cod]

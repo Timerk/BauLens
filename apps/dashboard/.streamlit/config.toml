@@ -1,0 +1,22 @@
+[server]
+headless = true
+maxUploadSize = 10
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = "none"
+
+[theme]
+base = "light"
+primaryColor = "#1F5F6B"
+backgroundColor = "#F7F6F3"
+secondaryBackgroundColor = "#ECEAE4"
+textColor = "#1E2326"
+borderColor = "#DAD7CF"
+font = "sans-serif"
+baseRadius = "0.4rem"
+showSidebarBorder = true

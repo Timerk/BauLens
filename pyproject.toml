@@ -79,13 +79,22 @@ extend-include = ["*.ipynb"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "N", "RUF", "PTH"]
 
+[tool.ruff.lint.per-file-ignores]
+# German UI text uses typographic dashes and the multiplication sign on purpose.
+"apps/dashboard/**" = ["RUF001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["baulens", "baulens_dashboard"]
+
 [tool.mypy]
-files = ["src/baulens"]
+files = ["src/baulens", "apps/dashboard"]
+mypy_path = "apps/dashboard"
 python_version = "3.12"
 strict = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["apps/dashboard"]
 addopts = "--strict-config --strict-markers"
 markers = [
     "slow: exercises computationally expensive paths",

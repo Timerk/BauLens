@@ -1,0 +1,69 @@
+# Full local stack: API, dashboard and Ollama for live report drafts.
+#   docker compose up --build
+# Public demo without Ollama (recorded report output only):
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build
+# Model weights are not in git: produce them with `make strength cracks` (see README).
+name: baulens
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    image: baulens-api:local
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      BAULENS_LLM_MODE: ${BAULENS_LLM_MODE:-live}
+    volumes:
+      - ./artifacts:/app/artifacts:ro
+    ports:
+      - "127.0.0.1:${BAULENS_API_PORT:-8000}:8000"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /home/baulens
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/dashboard.Dockerfile
+    image: baulens-dashboard:local
+    environment:
+      BAULENS_API_URL: http://api:8000
+      BAULENS_API_PUBLIC_URL: http://localhost:${BAULENS_API_PORT:-8000}
+    ports:
+      - "127.0.0.1:${BAULENS_DASHBOARD_PORT:-8501}:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /home/baulens
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:${OLLAMA_VERSION:-0.40.18}
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # One-shot: downloads the report model into the named volume, then exits.
+  ollama-pull:
+    image: ollama/ollama:${OLLAMA_VERSION:-0.40.18}
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "${BAULENS_LLM_MODEL:-qwen2.5:3b}"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  ollama:
