@@ -19,7 +19,7 @@ from baulens.report.facts import build_facts
 from baulens.report.generate import generate_report, generation_options
 from baulens.report.metrics import compute_metrics
 from baulens.report.prompting import ChatMessage, initial_messages, load_prompt
-from baulens.report.replay import ReplayClient, load_records
+from baulens.report.replay import RecordingClient, ReplayClient, load_records
 from baulens.report.template import template_draft
 from baulens.schemas import InspectionInput
 
@@ -214,7 +214,7 @@ def test_compare_runs_both_modes_and_writes_outputs(tmp_path: Path) -> None:
     assert (tmp_path / "figures" / "model_comparison.png").stat().st_size > 10_000
     text = doc.read_text(encoding="utf-8")
     assert "old" not in text and "| fake:1b / slots | 3 |" in text
-    assert reusable(run_dir, "fake:1b", "slots", cases, config)[0] == slots
+    assert reusable(run_dir, "fake:1b", "slots", cases, config, "fake")[0] == slots
 
 
 @pytest.mark.smoke
@@ -225,19 +225,24 @@ def test_resume_rejects_changed_inputs_and_settings(tmp_path: Path) -> None:
         config, cases, models=["fake:1b"], client_factory=lambda _: _scripted_reply(cases)
     )
     run_dir = Path(run.run_dir)
-    assert reusable(run_dir, "fake:1b", "free", cases, config)[0] is not None
+    assert reusable(run_dir, "fake:1b", "free", cases, config, "fake")[0] is not None
     assert cases[0].mix is not None
     changed_mix = cases[0].mix.model_copy(update={"cement": 950.0})
     changed = [cases[0].model_copy(update={"mix": changed_mix}), cases[1]]
-    assert reusable(run_dir, "fake:1b", "free", changed, config) == (
+    assert reusable(run_dir, "fake:1b", "free", changed, config, "fake") == (
         None,
         "inputs differs from the earlier run",
     )
     renamed = [cases[0].model_copy(update={"case_id": "PB-999"}), cases[1]]
-    assert reusable(run_dir, "fake:1b", "free", renamed, config)[0] is None
+    assert reusable(run_dir, "fake:1b", "free", renamed, config, "fake")[0] is None
+    # A run recorded from one source is never reused as another (live vs replay).
+    assert reusable(run_dir, "fake:1b", "free", cases, config, "replay") == (
+        None,
+        "source differs from the earlier run",
+    )
     hotter = config.model_copy(update={"temperature": 0.7})
     assert (
-        reusable(run_dir, "fake:1b", "free", cases, hotter)[1]
+        reusable(run_dir, "fake:1b", "free", cases, hotter, "fake")[1]
         == "options differs from the earlier run"
     )
 
@@ -314,3 +319,38 @@ def test_live_ollama_report_is_valid() -> None:
     result = generate_report(case, client, CONFIG)
     assert result.status in {"accepted", "rejected"}
     assert result.candidate is not None
+
+
+@pytest.mark.smoke
+def test_compare_from_replay_uses_the_recorded_replies(tmp_path: Path) -> None:
+    """`report compare --source replay` must find replays recorded by a live comparison."""
+    cases = load_cases(CASES_PATH)[:2]
+    config = _smoke_config(tmp_path).model_copy(update={"compare_modes": ["slots"]})
+    run_comparison(
+        config, cases, models=["fake:1b"], client_factory=lambda _: _scripted_reply(cases)
+    )
+    replayed = run_comparison(
+        config.model_copy(update={"artifacts_dir": tmp_path / "replayed"}),
+        cases,
+        models=["fake:1b"],
+        client_factory=lambda model: ReplayClient.from_directory(tmp_path / "replays", model),
+        record_replays=False,
+        source="replay",
+    )
+    row = replayed.metrics[0]
+    assert row.replay_misses == 0 and row.faithful_final == 1.0
+
+
+@pytest.mark.smoke
+def test_partial_replay_misses_are_excluded_from_rates(tmp_path: Path) -> None:
+    case = load_cases(CASES_PATH)[0]
+    recorder = RecordingClient(_scripted_reply([case]))
+    generate_report(case, recorder, CONFIG)
+    assert len(recorder.records) == 2  # first draft invents a number, the correction is clean
+    first_only = ReplayClient("fake:1b", recorder.records[:1])
+    partial = generate_report(case, first_only, CONFIG)
+    assert partial.status == "replay_miss" and len(partial.attempts) == 1
+    metrics = compute_metrics("fake:1b", [partial], mode="slots")
+    assert metrics.replay_misses == 1 and metrics.cases == 1
+    assert metrics.schema_valid == metrics.faithful_initial == 0.0
+    assert metrics.calls_per_case == 0.0 and metrics.latency_median_s is None

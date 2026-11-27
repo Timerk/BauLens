@@ -40,7 +40,10 @@ def load_labelled(path: Path) -> tuple[str, list[LabelledSentence]]:
 def evaluate_labelled(path: Path, cases: Sequence[InspectionInput]) -> list[LabelledResult]:
     """Run each labelled sentence through its mode's checker and count the misjudgements."""
     case_id, sentences = load_labelled(path)
-    sheet = build_facts(next(case for case in cases if case.case_id == case_id))
+    case = next((case for case in cases if case.case_id == case_id), None)
+    if case is None:
+        return []  # the labelled case is not part of this (e.g. limited) run
+    sheet = build_facts(case)
     results = []
     for mode in ("free", "slots"):
         rows = [sentence for sentence in sentences if sentence.mode == mode]

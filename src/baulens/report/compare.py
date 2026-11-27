@@ -442,11 +442,12 @@ def run_comparison(
     (run_dir / "summary.json").write_text(run.model_dump_json(indent=2), encoding="utf-8")
     block = summary_block(run)
     labelled = project_path(config.labelled_path) if config.labelled_path else None
-    if labelled is not None and labelled.exists():
+    labelled_rows = evaluate_labelled(labelled, cases) if labelled and labelled.exists() else []
+    if labelled_rows:
         block += (
             "\nChecker on the hand-labelled sentences of "
             "[`labelled_sentences.yaml`](../../data/report_cases/labelled_sentences.yaml):\n\n"
-            + labelled_summary(evaluate_labelled(labelled, cases))
+            + labelled_summary(labelled_rows)
         )
     (run_dir / "summary.md").write_text(block, encoding="utf-8")
     if config.figures_dir is not None:

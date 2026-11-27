@@ -267,7 +267,7 @@ def slot_reply(case: InspectionInput, **changes: str) -> str:
 def test_slot_mode_inserts_numbers_by_code() -> None:
     case = both_case()
     reply = slot_reply(case)
-    assert "61,9" not in reply and "{druckfestigkeit} MPa" in reply
+    assert "61,9" not in reply and "{druckfestigkeit}" in reply and "MPa" not in reply
     client = FakeClient([reply], model="fake-s")
     result = generate_report(case, client, CONFIG)
     assert CONFIG.generation_mode == "slots" and result.mode == "slots"
@@ -288,7 +288,7 @@ def test_slot_mode_rejects_literal_numbers_and_misplaced_slots() -> None:
     assert first is not None
     assert [check.reason for check in first.violations] == ["Zahl außerhalb eines Platzhalters"] * 2
 
-    misplaced = slot_reply(case, zusammenfassung="Die Druckfestigkeit beträgt {obere_grenze} MPa.")
+    misplaced = slot_reply(case, zusammenfassung="Die Druckfestigkeit beträgt {obere_grenze}.")
     rejected = generate_report(case, FakeClient([misplaced, misplaced]), CONFIG)
     assert rejected.status == "rejected" and rejected.fallback_used
     assert rejected.faithfulness is not None
@@ -313,8 +313,8 @@ def test_replay_lookup_uses_the_full_input_identity(tmp_path: Path) -> None:
     assert case.image is not None
     changed = case.model_copy(update={"image": case.image.model_copy(update={"sha256": "a" * 64})})
     # Same messages (the hash is not in the prompt), but a different input: a miss.
-    assert initial_messages(build_facts(changed), load_prompt("report_slots_v1")) == (
-        initial_messages(build_facts(case), load_prompt("report_slots_v1"))
+    assert initial_messages(build_facts(changed), load_prompt("report_slots_v2")) == (
+        initial_messages(build_facts(case), load_prompt("report_slots_v2"))
     )
     assert generate_report(changed, replay, CONFIG).status == "replay_miss"
 
@@ -331,3 +331,17 @@ def test_crack_finding_must_be_stated_explicitly() -> None:
     report = InspectionReport(case_id=case.case_id, draft=draft, generator="fake")
     result = check_completeness(report, check_sections(draft.sections(), sheet), sheet)
     assert "crack_label" in result.missing and result.score < 1.0
+
+
+def test_slot_expansion_beyond_the_section_limit_falls_back() -> None:
+    """A long element name repeated through {bauteil} must not crash generate_report."""
+    image = crack_case().image
+    assert image is not None
+    long_image = image.model_copy(update={"element": "Stütze " + "a" * 110})
+    case = InspectionInput(case_id="PB-040", image=long_image, crack=crack_case().crack)
+    long_summary = "; ".join(["{bauteil}"] * 18)
+    reply = slot_reply(case, zusammenfassung=long_summary)
+    result = generate_report(case, FakeClient([reply, reply]), CONFIG)
+    assert result.status == "invalid" and result.fallback_used
+    assert result.attempts[0].schema_error is not None
+    assert "Platzhalter" in result.attempts[0].schema_error
