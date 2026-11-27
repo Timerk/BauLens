@@ -14,7 +14,7 @@ from baulens.cli import app
 from baulens.config import ReportConfig, load_config
 from baulens.report.cases import SCENARIOS, generate_cases, load_cases
 from baulens.report.clients import FakeClient, LLMError, OllamaClient
-from baulens.report.compare import DOC_BEGIN, DOC_END, reusable, run_comparison
+from baulens.report.compare import DOC_BEGIN, DOC_END, load_results, reusable, run_comparison
 from baulens.report.facts import build_facts
 from baulens.report.generate import generate_report, generation_options
 from baulens.report.metrics import compute_metrics
@@ -354,3 +354,19 @@ def test_partial_replay_misses_are_excluded_from_rates(tmp_path: Path) -> None:
     assert metrics.replay_misses == 1 and metrics.cases == 1
     assert metrics.schema_valid == metrics.faithful_initial == 0.0
     assert metrics.calls_per_case == 0.0 and metrics.latency_median_s is None
+
+
+@pytest.mark.smoke
+def test_cli_compare_from_committed_replays_has_no_misses() -> None:
+    """The documented offline command re-scores committed records without a model."""
+    result = runner.invoke(
+        app,
+        ["report", "compare", "--source", "replay", "--model", "qwen2.5:3b", "--limit", "1",
+         "--no-replays", "--no-docs"],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    run_dir = Path(result.stdout.strip().splitlines()[-1].removeprefix("results: "))
+    for mode in CONFIG.compare_modes:
+        rows = load_results(run_dir / f"results_qwen2.5_3b__{mode}.jsonl")
+        assert [row.status for row in rows] != ["replay_miss"]
+        assert all(row.source == "replay" for row in rows)
