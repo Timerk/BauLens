@@ -7,7 +7,7 @@ driver 32.0.21045.16010).
 AMD's Windows wheels for gfx1030 ran both crack backbones with ROCm 10.0.0, PyTorch
 2.13.0+rocm10.0.0 (HIP runtime reported by PyTorch as 7.15.26333), and torchvision
 0.28.0+rocm10.0.0. The CPU environment uses PyTorch 2.15.0+cpu and ONNX Runtime 1.32.0.
-Both environments use CPython 3.12.14. The ROCm wheels came from
+Both environments use CPython 3.12.14 and uv 0.12.19. The ROCm wheels came from
 [AMD's PyTorch installation guide](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/frameworks/pytorch/install.html?rocm-ver=10.0.0).
 
 ## Set up the environments
@@ -39,8 +39,7 @@ Save the probe below to `artifacts/rocm_probe.py` and run
 ResNet18 and 14.10 s for EfficientNet-B0. The next three steps took 34-45 ms and
 70-71 ms, respectively, with a preloaded synthetic batch on the GPU. MIOpen reported
 a missing optional CK grouped-convolution library for gfx1030, and the compiler warned
-about XNACK capability. Both backbones completed the probe. No WSL2 install or DirectML
-install was needed.
+about XNACK capability. Both backbones completed the probe.
 
 ```python
 import time
@@ -91,3 +90,8 @@ $config = 'configs/cracks_full.yaml'
 uv run --locked baulens cracks export --config $config
 uv run --locked baulens cracks benchmark --config $config
 ```
+
+EfficientNet-B0's first process aborted in native HIP code after completing and saving epoch 3.
+Its stack trace went through `c10_hip.dll` and `torch_hip.dll` during a device-to-host scalar
+read. The log gives no specific HIP error code. Rerunning the same command restored epoch 3
+and completed training, evaluation and export. ResNet18 completed without a restart.
