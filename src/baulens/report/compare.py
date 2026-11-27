@@ -1,7 +1,7 @@
 """Run every evaluation case through every model and generation mode and summarise the results.
 
 One command reproduces the committed numbers: ``baulens report compare``. For each model it
-runs every mode in ``config.compare_modes`` (free-text and slots) with identical decoding
+runs every mode in ``config.compare_modes`` (free text and narrative) with identical decoding
 options, then unloads the model (``keep_alive`` 0) before loading the next one. Raw results
 go to ``artifacts/report/runs/<timestamp>/``; the replay files, the figure and the generated
 block in ``docs/results/report.md`` are rewritten in place.
@@ -30,6 +30,7 @@ from baulens.report.completeness import check_completeness
 from baulens.report.facts import build_facts
 from baulens.report.faithfulness import CHECKER_VERSION
 from baulens.report.generate import (
+    facts_check,
     generate_report,
     generate_template,
     generation_options,
@@ -245,9 +246,11 @@ def rescore(
     for result in results:
         case = by_id[result.case_id]
         if result.candidate is not None and result.faithfulness is not None:
-            completeness = check_completeness(
-                result.candidate, result.faithfulness, build_facts(case)
+            sheet = build_facts(case)
+            stated = facts_check(
+                result.candidate.draft, result.faithfulness, sheet, result.mode or "free"
             )
+            completeness = check_completeness(result.candidate, stated, sheet)
             result = result.model_copy(update={"completeness": completeness})
         rescored.append(result)
     return rescored

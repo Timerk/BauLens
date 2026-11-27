@@ -5,12 +5,18 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 SectionName = Literal[
-    "zusammenfassung", "druckfestigkeit", "rissbefund", "einschraenkungen", "empfehlung"
+    "zusammenfassung",
+    "druckfestigkeit",
+    "rissbefund",
+    "bewertung",
+    "einschraenkungen",
+    "empfehlung",
 ]
 SECTION_ORDER: tuple[SectionName, ...] = (
     "zusammenfassung",
     "druckfestigkeit",
     "rissbefund",
+    "bewertung",
     "einschraenkungen",
     "empfehlung",
 )
@@ -18,9 +24,16 @@ SECTION_TITLES: dict[SectionName, str] = {
     "zusammenfassung": "Zusammenfassung",
     "druckfestigkeit": "Druckfestigkeit",
     "rissbefund": "Rissbefund",
+    "bewertung": "Bewertung",
     "einschraenkungen": "Einschränkungen",
     "empfehlung": "Empfehlung",
 }
+FACT_SECTIONS: tuple[SectionName, ...] = ("zusammenfassung", "druckfestigkeit", "rissbefund")
+"""Narrative mode: rendered by code from the input ("Befunde")."""
+NARRATIVE_SECTIONS: tuple[SectionName, ...] = ("bewertung", "einschraenkungen", "empfehlung")
+"""Narrative mode: written by the model (or the template fallback), checked to contain no
+numbers and no findings."""
+MAX_NARRATIVE_CHARS = 900
 MAX_SECTION_CHARS = 2000
 
 DISCLAIMER = (
@@ -33,15 +46,15 @@ DISCLAIMER = (
 
 Source = Literal["live", "replay", "fake", "template"]
 Status = Literal["accepted", "rejected", "invalid", "error", "replay_miss", "template"]
-Mode = Literal["free", "slots"]
-CheckStatus = Literal["ok", "invented", "misattributed", "inexact", "unbound", "missing"]
-ViolationKind = Literal["invented", "misattributed", "inexact", "unbound", "missing"]
+Mode = Literal["free", "narrative"]
+CheckStatus = Literal["ok", "invented", "misattributed", "inexact", "unbound", "restated"]
+ViolationKind = Literal["invented", "misattributed", "inexact", "unbound", "restated"]
 VIOLATION_KINDS: tuple[ViolationKind, ...] = (
     "invented",
     "misattributed",
     "inexact",
     "unbound",
-    "missing",
+    "restated",
 )
 
 
@@ -55,6 +68,7 @@ class ReportDraft(_Model):
     zusammenfassung: str = Field(min_length=1, max_length=MAX_SECTION_CHARS)
     druckfestigkeit: str | None = Field(default=None, min_length=1, max_length=MAX_SECTION_CHARS)
     rissbefund: str | None = Field(default=None, min_length=1, max_length=MAX_SECTION_CHARS)
+    bewertung: str | None = Field(default=None, min_length=1, max_length=MAX_SECTION_CHARS)
     einschraenkungen: str = Field(min_length=1, max_length=MAX_SECTION_CHARS)
     empfehlung: str = Field(min_length=1, max_length=MAX_SECTION_CHARS)
 
@@ -94,7 +108,7 @@ class NumberCheck(_Model):
     start: int
     end: int
     text: str
-    kind: Literal["number", "numeral", "date", "time", "reference", "slot"]
+    kind: Literal["number", "numeral", "date", "time", "reference", "brace", "finding"]
     value: str | None = None
     unit: str | None = None
     status: CheckStatus

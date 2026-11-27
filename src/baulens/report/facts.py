@@ -1,4 +1,4 @@
-"""Citable facts of an inspection case, rendered once for the prompt, the slots and the checker.
+"""Citable facts of an inspection case, rendered once for the prompt, the report and the checker.
 
 Every number a report may contain comes from a :class:`Fact` and is accepted only in exactly
 the form shown to the model (``Fact.number``, German format, ROUND_HALF_UP). There is no
@@ -17,7 +17,7 @@ which the model writes ``{druckfestigkeit}`` and code inserts ``61,9 MPa``.
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from pathlib import PurePath
 from typing import Literal
 
@@ -116,15 +116,6 @@ class Identifier:
 
 
 @dataclass(frozen=True)
-class TextSlot:
-    """A non-numeric slot (identifier, date or time) with its rendered text."""
-
-    slot: str
-    label: str
-    text: str
-
-
-@dataclass(frozen=True)
 class FactGroup:
     title: str
     lines: tuple[str, ...]
@@ -138,7 +129,6 @@ class FactSheet:
     facts: tuple[Fact, ...]
     groups: tuple[FactGroup, ...]
     identifiers: tuple[Identifier, ...]
-    text_slots: tuple[TextSlot, ...]
     dates: tuple[str, ...]
     times: tuple[str, ...]
 
@@ -147,13 +137,6 @@ class FactSheet:
 
     def roles(self) -> set[str]:
         return {fact.role for fact in self.facts}
-
-    def slots(self) -> dict[str, str]:
-        """Slot name to inserted text. A number slot inserts the complete quantity, with sign
-        and unit (``61,9 MPa``, a signed ``-3,1 MPa``, ``93,1 %``); the model writes neither."""
-        rendered = {fact.slot: fact.display for fact in self.facts}
-        rendered.update({slot.slot: slot.text for slot in self.text_slots})
-        return rendered
 
     def render(self) -> str:
         """The fact list exactly as it is shown to the model in free-text mode."""
@@ -169,7 +152,11 @@ def to_decimal(value: float) -> Decimal:
 
 
 def quantize(value: Decimal, decimals: int) -> Decimal:
-    return value.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
+    """Round half up with enough local precision for any finite float input (``1e30``,
+    ``1e308``): the default context's 28 digits would raise ``InvalidOperation``."""
+    digits = max(value.adjusted(), 0) + decimals + 2 if value.is_finite() else 0
+    with localcontext(prec=max(28, digits)):
+        return value.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
 
 
 def shown_decimals(value: Decimal, max_decimals: int) -> int:
@@ -508,13 +495,11 @@ def _identifiers(case: InspectionInput) -> list[Identifier]:
 
 
 def build_facts(case: InspectionInput) -> FactSheet:
-    """Collect the citable facts, identifiers, dates and slots of one inspection case."""
+    """Collect the citable facts, identifiers and dates of one inspection case."""
     facts: list[Fact] = []
     general = [f"Fall-ID: {case.case_id}"]
-    text_slots = [TextSlot("fall_id", "Fall-ID", case.case_id)]
     if case.image is not None and case.image.element:
         general.append(f"Bauteil: {case.image.element}")
-        text_slots.append(TextSlot("bauteil", "Bauteil", case.image.element))
     groups = [FactGroup("Allgemein", tuple(general))]
     if case.mix is not None:
         mix_facts, group = _mix_facts(case.mix)
@@ -530,39 +515,14 @@ def build_facts(case: InspectionInput) -> FactSheet:
         crack_facts, group = _crack_facts(case.crack, case.image)
         facts += crack_facts
         groups.append(group)
-    if case.image is not None:
-        text_slots.append(TextSlot("bild", "Bilddatei", case.image.filename))
-        if case.image.captured_at is not None:
-            dates.append(render_date(case.image.captured_at))
-            times.append(render_time(case.image.captured_at))
-            text_slots += [
-                TextSlot("aufnahmedatum", "Aufnahmedatum", dates[0]),
-                TextSlot("aufnahmezeit", "Aufnahmezeit", f"{times[0]} Uhr"),
-            ]
-    if case.strength is not None:
-        text_slots += [
-            TextSlot(
-                "festigkeitsmodell",
-                "Festigkeitsmodell",
-                f"{case.strength.model_name} (Version {case.strength.model_version})",
-            ),
-            TextSlot("norm_druckfestigkeit", "Norm Druckfestigkeitsprüfung", "DIN EN 12390-3"),
-            TextSlot("norm_bohrkern", "Norm Bohrkernprüfung", "DIN EN 12504-1"),
-        ]
-    if case.crack is not None:
-        text_slots.append(
-            TextSlot(
-                "rissmodell",
-                "Rissmodell",
-                f"{case.crack.model_name} (Version {case.crack.model_version})",
-            )
-        )
+    if case.image is not None and case.image.captured_at is not None:
+        dates.append(render_date(case.image.captured_at))
+        times.append(render_time(case.image.captured_at))
     return FactSheet(
         case=case,
         facts=tuple(facts),
         groups=tuple(groups),
         identifiers=tuple(_identifiers(case)),
-        text_slots=tuple(text_slots),
         dates=tuple(dates),
         times=tuple(times),
     )

@@ -162,7 +162,7 @@ def metrics_table(rows: Sequence[ModelMetrics]) -> str:
     quality = [
         "| Model / mode | Cases | Schema-valid (1st try / final) | No detected violation, "
         "first draft | Accepted after retry | Rejected / invalid / error / replay miss "
-        "| Violations per first draft (invented / misattributed / inexact / unbound / missing) "
+        "| Violations per first draft (invented / misattributed / inexact / unbound / restated) "
         "| Completeness (drafts / accepted) |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
@@ -173,7 +173,7 @@ def metrics_table(rows: Sequence[ModelMetrics]) -> str:
             f"{_percent(row.schema_valid)} | {_percent(row.faithful_initial)} | "
             f"{_percent(row.faithful_final)} | {row.rejected} / {row.invalid} / {row.errors} / "
             f"{row.replay_misses} | {v['invented']:.2f} / {v['misattributed']:.2f} / "
-            f"{v['inexact']:.2f} / {v['unbound']:.2f} / {v['missing']:.2f} | "
+            f"{v['inexact']:.2f} / {v['unbound']:.2f} / {v['restated']:.2f} | "
             f"{_number(row.completeness_mean, 2)} / "
             f"{_number(row.completeness_accepted_mean, 2)} |"
         )
@@ -212,7 +212,7 @@ _GRID = "#e6e6e6"
 def save_figure(rows: Sequence[ModelMetrics], path: Path, *, subtitle: str) -> Path:
     """Rates per model and mode (left) and latency (right); two panels, no dual axis.
 
-    Colour identifies the model; the free-text mode is hatched, the slot mode solid.
+    Colour identifies the model; the free-text mode is hatched, the narrative mode solid.
     """
     import matplotlib
 

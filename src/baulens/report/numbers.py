@@ -30,7 +30,7 @@ from typing import Literal
 from baulens.report.numerals import find_numerals
 
 TokenKind = Literal["number"]
-SpecialKind = Literal["date", "time", "reference", "slot", "numeral"]
+SpecialKind = Literal["date", "time", "reference", "numeral"]
 MaskKind = Literal["identifier", "standard"]
 
 _BLANK = "█"
@@ -132,7 +132,6 @@ class Extraction:
     masked_text: str
 
 
-_SLOT = re.compile(r"\{([a-z0-9_]+)\}")
 _REFERENCE = re.compile(
     r"(?<![\w])(?:(?:DIN|EN|ISO)[ \u00a0]+)+\d{1,5}(?:-\d{1,3})*(?::\d{4})?(?!\d)"
 )
@@ -260,12 +259,7 @@ def _mask_identifiers(masker: _Masker, identifiers: tuple[tuple[str, bool], ...]
             masker.mask("identifier", *match.span(1))
 
 
-def _mask_structure(
-    masker: _Masker, identifiers: tuple[tuple[str, bool], ...], slots: bool
-) -> None:
-    if slots:
-        for match in list(_SLOT.finditer(masker.text)):
-            masker.special("slot", *match.span(), match[1])
+def _mask_structure(masker: _Masker, identifiers: tuple[tuple[str, bool], ...]) -> None:
     _mask_identifiers(masker, identifiers)
     for match in list(_REFERENCE.finditer(masker.text)):
         if is_allowed_reference(match.group()):
@@ -397,11 +391,10 @@ def extract(
     text: str,
     *,
     identifiers: tuple[tuple[str, bool], ...] = (),
-    slots: bool = False,
 ) -> Extraction:
     """Find every numeric token in ``text`` after masking identifiers and structure."""
     masker = _Masker(text)
-    _mask_structure(masker, identifiers, slots)
+    _mask_structure(masker, identifiers)
     numbers = _number_tokens(masker.text, text)
     # Everything numeric the German parser does not read (number words, non-ASCII digits,
     # Roman numerals) is reported as a numeral and never matches a fact.

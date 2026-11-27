@@ -94,6 +94,11 @@ _FRACTION = re.compile(
     r"^(halb\w*|hälfte\w*|anderthalb\w*|eineinhalb\w*|"
     r"(dritt|viert|fünft|sechst|siebt|acht|neunt|zehnt|zwanzigst|hundertst|tausendst)el\w*)$"
 )
+_COMPOUND_SUFFIX = re.compile(
+    r"^(prozent|promill|tel|el|fach|mal|jährig|tägig|stündig|wöchig|monatig|teilig|stellig"
+    r"|seitig|stufig|lagig|achsig|eckig|köpfig|zeilig|wertig|minütig|sekündig|stöckig|geschossig"
+    r"|zehntel|hundertstel|tausendstel)\w*$"
+)
 _MULTIPLIER = re.compile(r"^(doppelt\w*|zweierlei|dreierlei)$")
 _QUANTITY_NOUN = re.compile(r"^(dutzend\w*|hunderte\w*|tausende\w*|million\w*|milliard\w*)$")
 _PAAR = re.compile(r"^Paar(e|en)?$")
@@ -173,6 +178,26 @@ def _is_multiplier(word: str) -> bool:
     return False
 
 
+def _is_numeric_compound(word: str) -> bool:
+    """A cardinal stem joined to a numeric suffix: "zwölfprozentig", "Fünfzehntel",
+    "einjährig", "dreistufig", "zweiseitig", "achtundzwanzigtägig"."""
+    for index in range(2, len(word) - 1):
+        stem, rest = word[:index], word[index:]
+        if not _COMPOUND_SUFFIX.match(rest):
+            continue
+        if stem == "ein" and rest.startswith(("fach", "mal")):
+            continue  # "einfach", "einmal(ig)" are ordinary words, not counts
+        if stem in _UNIT_PREFIX or parse_cardinal(stem) is not None:
+            return True
+        # ordinal stems before "-tel": "fünfzehn" + "tel", "zwanzigst" + "el"
+        ordinal_stem = stem in _ORDINAL_STEMS or (
+            stem.endswith("st") and parse_cardinal(stem[:-2]) is not None
+        )
+        if rest.startswith("el") and ordinal_stem:
+            return True
+    return False
+
+
 def is_number_word(word: str) -> bool:
     """Whether a German word expresses a number (see the module docstring for the scope)."""
     if _PAAR.match(word):
@@ -186,7 +211,22 @@ def is_number_word(word: str) -> bool:
         or _FRACTION.match(lowered)
         or _is_multiplier(lowered)
         or _QUANTITY_NOUN.match(lowered)
+        or _is_numeric_compound(lowered)
     )
+
+
+_HYPHENS = "".join(
+    map(chr, (0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, 0x2212, 0xFE58, 0xFE63, 0xFF0D))
+)
+_SPACES = "".join(map(chr, (0x00A0, 0x1680, *range(0x2000, 0x200B), 0x202F, 0x205F, 0x3000)))
+_INVISIBLE = "[" + "".join(map(chr, (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD))) + "]"
+_TYPOGRAPHY = str.maketrans(dict.fromkeys(_HYPHENS, "-") | dict.fromkeys(_SPACES, " "))
+
+
+def normalize_typography(text: str) -> str:
+    """Map Unicode hyphens and minus signs to "-" and Unicode spaces to " " (same length),
+    and drop zero-width characters, so that variants cannot hide a sign or a suffix."""
+    return re.sub(_INVISIBLE, "", text.translate(_TYPOGRAPHY))
 
 
 def find_numerals(text: str, *, include_ascii_digits: bool = True) -> list[Numeral]:

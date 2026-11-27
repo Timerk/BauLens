@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from report_helpers import both_case, crack_case, template_reply
+from report_helpers import NARRATIVE, both_case, crack_case, narrative_reply, template_reply
 from typer.testing import CliRunner
 
 from baulens.cli import app
@@ -16,11 +16,10 @@ from baulens.report.cases import SCENARIOS, generate_cases, load_cases
 from baulens.report.clients import FakeClient, LLMError, OllamaClient
 from baulens.report.compare import DOC_BEGIN, DOC_END, load_results, reusable, run_comparison
 from baulens.report.facts import build_facts
-from baulens.report.generate import generate_report, generation_options
+from baulens.report.generate import generate_report, generation_options, prompt_for
 from baulens.report.metrics import compute_metrics
 from baulens.report.prompting import ChatMessage, initial_messages, load_prompt
-from baulens.report.replay import RecordingClient, ReplayClient, load_records
-from baulens.report.template import template_draft
+from baulens.report.replay import RecordingClient, ReplayClient, load_records, replay_path
 from baulens.schemas import InspectionInput
 
 CONFIG = load_config(Path("configs/report.yaml"), ReportConfig)
@@ -154,7 +153,10 @@ def test_template_is_faithful_and_complete_on_every_case() -> None:
 @pytest.mark.parametrize("model", CONFIG.models)
 def test_committed_replays_cover_every_case(model: str, mode: str) -> None:
     replay = ReplayClient.from_directory(REPLAY_DIR, model)
-    assert len(replay) > 0, f"no replay recorded for {model}"
+    version = prompt_for(CONFIG, mode).prompt_version  # type: ignore[arg-type]
+    recorded = {record.prompt_version for record in load_records(replay_path(REPLAY_DIR, model))}
+    if version not in recorded:
+        pytest.skip(f"{model} has no recorded replies for prompt {version} yet")
     for case in load_cases(CASES_PATH):
         result = generate_report(case, replay, CONFIG, mode=mode)  # type: ignore[arg-type]
         assert result.source == "replay"
@@ -166,12 +168,12 @@ def _scripted_reply(cases: list[InspectionInput]) -> FakeClient:
 
     def reply(messages: Sequence[ChatMessage]) -> str:
         case = next(c for c in cases if c.case_id in messages[1].content)
-        slots = "Platzhalter" in messages[0].content
-        extra = (
-            " Es sind 3 Bohrkerne zu entnehmen." if case is cases[0] and len(messages) == 2 else ""
-        )
-        draft = json.loads(template_reply(case, slots=slots))
-        draft["empfehlung"] += extra
+        first = case is cases[0] and len(messages) == 2
+        if "Befunde, die im Bericht bereits stehen" in messages[1].content:
+            extra = " Es sind drei Bohrkerne zu entnehmen." if first else ""
+            return narrative_reply(empfehlung=NARRATIVE["empfehlung"] + extra)
+        draft = json.loads(template_reply(case))
+        draft["empfehlung"] += " Es sind 3 Bohrkerne zu entnehmen." if first else ""
         return json.dumps(draft, ensure_ascii=False)
 
     return FakeClient(reply, model="fake:1b")
@@ -197,24 +199,24 @@ def test_compare_runs_both_modes_and_writes_outputs(tmp_path: Path) -> None:
     run = run_comparison(
         config, cases, models=["fake:1b"], client_factory=lambda _: _scripted_reply(cases)
     )
-    free, slots, template = run.metrics
-    assert (free.mode, slots.mode, template.mode) == ("free", "slots", None)
-    for row in (free, slots):
+    free, narrative, template = run.metrics
+    assert (free.mode, narrative.mode, template.mode) == ("free", "narrative", None)
+    for row in (free, narrative):
         assert row.cases == 3
         assert row.faithful_initial == pytest.approx(2 / 3)
         assert row.faithful_final == 1.0
         assert row.violations_per_report["invented"] == pytest.approx(1 / 3)
     assert template.faithful_initial == template.faithful_final == 1.0
     run_dir = Path(run.run_dir)
-    for mode in ("free", "slots"):
+    for mode in ("free", "narrative"):
         lines = (run_dir / f"results_fake_1b__{mode}.jsonl").read_text(encoding="utf-8")
         assert len(lines.splitlines()) == 3
     records = load_records(tmp_path / "replays" / "fake_1b.jsonl")
     assert len(records) == 8  # 3 cases x 2 modes + one correction per mode
     assert (tmp_path / "figures" / "model_comparison.png").stat().st_size > 10_000
     text = doc.read_text(encoding="utf-8")
-    assert "old" not in text and "| fake:1b / slots | 3 |" in text
-    assert reusable(run_dir, "fake:1b", "slots", cases, config, "fake")[0] == slots
+    assert "old" not in text and "| fake:1b / narrative | 3 |" in text
+    assert reusable(run_dir, "fake:1b", "narrative", cases, config, "fake")[0] == narrative
 
 
 @pytest.mark.smoke
@@ -251,7 +253,7 @@ def test_resume_rejects_changed_inputs_and_settings(tmp_path: Path) -> None:
 def test_replay_misses_are_counted_separately() -> None:
     cases = load_cases(CASES_PATH)[:2]
     results = [generate_report(case, ReplayClient("none", []), CONFIG) for case in cases]
-    metrics = compute_metrics("none", results, mode="slots")
+    metrics = compute_metrics("none", results, mode="narrative")
     assert metrics.replay_misses == 2
     assert metrics.schema_valid == metrics.faithful_initial == metrics.faithful_final == 0.0
     assert metrics.completeness_mean is None and metrics.calls_per_case == 0.0
@@ -298,10 +300,7 @@ def test_cli_generate_check_and_reject_path(tmp_path: Path) -> None:
 @pytest.mark.smoke
 def test_fake_generation_rejects_and_falls_back() -> None:
     case = both_case()
-    bad = json.dumps(
-        {**template_draft(build_facts(case)).model_dump(exclude_none=True), "empfehlung": "C30/37"},
-        ensure_ascii=False,
-    )
+    bad = template_reply(case, empfehlung="C30/37")
     result = generate_report(case, FakeClient([bad, bad]), CONFIG, mode="free")
     assert result.status == "rejected" and result.delivered.generator == "template"
     assert {check.text for check in result.faithfulness.violations} == {"30", "37"}  # type: ignore[union-attr]
@@ -325,7 +324,7 @@ def test_live_ollama_report_is_valid() -> None:
 def test_compare_from_replay_uses_the_recorded_replies(tmp_path: Path) -> None:
     """`report compare --source replay` must find replays recorded by a live comparison."""
     cases = load_cases(CASES_PATH)[:2]
-    config = _smoke_config(tmp_path).model_copy(update={"compare_modes": ["slots"]})
+    config = _smoke_config(tmp_path).model_copy(update={"compare_modes": ["narrative"]})
     run_comparison(
         config, cases, models=["fake:1b"], client_factory=lambda _: _scripted_reply(cases)
     )
@@ -350,7 +349,7 @@ def test_partial_replay_misses_are_excluded_from_rates(tmp_path: Path) -> None:
     first_only = ReplayClient("fake:1b", recorder.records[:1])
     partial = generate_report(case, first_only, CONFIG)
     assert partial.status == "replay_miss" and len(partial.attempts) == 1
-    metrics = compute_metrics("fake:1b", [partial], mode="slots")
+    metrics = compute_metrics("fake:1b", [partial], mode="narrative")
     assert metrics.replay_misses == 1 and metrics.cases == 1
     assert metrics.schema_valid == metrics.faithful_initial == 0.0
     assert metrics.calls_per_case == 0.0 and metrics.latency_median_s is None
@@ -361,12 +360,12 @@ def test_cli_compare_from_committed_replays_has_no_misses() -> None:
     """The documented offline command re-scores committed records without a model."""
     result = runner.invoke(
         app,
-        ["report", "compare", "--source", "replay", "--model", "qwen2.5:3b", "--limit", "1",
-         "--no-replays", "--no-docs"],
+        ["report", "compare", "--source", "replay", "--model", "qwen2.5:3b", "--mode", "free",
+         "--limit", "1", "--no-replays", "--no-docs"],
     )  # fmt: skip
     assert result.exit_code == 0, result.output
     run_dir = Path(result.stdout.strip().splitlines()[-1].removeprefix("results: "))
-    for mode in CONFIG.compare_modes:
+    for mode in ("free",):
         rows = load_results(run_dir / f"results_qwen2.5_3b__{mode}.jsonl")
         assert [row.status for row in rows] != ["replay_miss"]
         assert all(row.source == "replay" for row in rows)

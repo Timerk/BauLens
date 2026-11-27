@@ -75,22 +75,28 @@ def both_case(**overrides: object) -> InspectionInput:
     )
 
 
-def template_reply(case: InspectionInput, *, slots: bool = False, **changes: str) -> str:
-    """A model reply built from the template text; with ``slots`` every number is a placeholder."""
+def template_reply(case: InspectionInput, **changes: str) -> str:
+    """A free-text model reply built from the template text."""
     import json
 
     from baulens.report.facts import build_facts
     from baulens.report.template import template_draft
 
-    sheet = build_facts(case)
-    draft = template_draft(sheet).model_dump(exclude_none=True)
-    if slots:
-        # Replace every rendered quantity, identifier and norm by its slot.
-        replacements = {fact.display: fact.slot for fact in sheet.facts}
-        replacements |= {slot.text: slot.slot for slot in sheet.text_slots}
-        for name, text in draft.items():
-            for value in sorted(replacements, key=len, reverse=True):
-                text = text.replace(value, "{" + replacements[value] + "}")
-            draft[name] = text
+    draft = template_draft(build_facts(case)).model_dump(exclude_none=True)
+    draft.pop("bewertung", None)
     draft.update(changes)
     return json.dumps(draft, ensure_ascii=False)
+
+
+NARRATIVE = {
+    "bewertung": "Die Befunde sind als Modellschätzung einzuordnen und fachlich zu prüfen.",
+    "einschraenkungen": "Der Entwurf beruht auf Modellen und ersetzt keine Prüfung vor Ort.",
+    "empfehlung": "Eine Sichtprüfung vor Ort und eine Prüfung an Bohrkernen werden empfohlen.",
+}
+
+
+def narrative_reply(**changes: str) -> str:
+    """A narrative-mode reply without numbers or findings."""
+    import json
+
+    return json.dumps({**NARRATIVE, **changes}, ensure_ascii=False)

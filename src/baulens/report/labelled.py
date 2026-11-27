@@ -9,14 +9,14 @@ from pydantic import BaseModel, ConfigDict
 
 from baulens.report.facts import build_facts
 from baulens.report.faithfulness import check_text
-from baulens.report.slots import check_slot_text
+from baulens.report.narrative import check_narrative_text
 from baulens.schemas import InspectionInput
 
 
 class LabelledSentence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    mode: Literal["free", "slots"]
+    mode: Literal["free", "narrative"]
     correct: bool
     text: str
     note: str | None = None
@@ -25,7 +25,7 @@ class LabelledSentence(BaseModel):
 class LabelledResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    mode: Literal["free", "slots"]
+    mode: Literal["free", "narrative"]
     correct_total: int
     false_positives: list[str]
     wrong_total: int
@@ -45,13 +45,13 @@ def evaluate_labelled(path: Path, cases: Sequence[InspectionInput]) -> list[Labe
         return []  # the labelled case is not part of this (e.g. limited) run
     sheet = build_facts(case)
     results = []
-    for mode in ("free", "slots"):
+    for mode in ("free", "narrative"):
         rows = [sentence for sentence in sentences if sentence.mode == mode]
         flagged = {
             sentence.text: not (
                 check_text(sentence.text, sheet)
                 if mode == "free"
-                else check_slot_text(sentence.text, sheet)
+                else check_narrative_text(sentence.text)
             ).faithful
             for sentence in rows
         }

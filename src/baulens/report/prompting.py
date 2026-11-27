@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import re
 from dataclasses import dataclass
 from functools import cache
 from importlib import resources
@@ -15,16 +14,20 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from baulens.report.facts import FactSheet
 from baulens.report.faithfulness import describe_violations
 from baulens.report.schemas import (
+    MAX_NARRATIVE_CHARS,
     MAX_SECTION_CHARS,
+    NARRATIVE_SECTIONS,
     SECTION_ORDER,
+    SECTION_TITLES,
     FaithfulnessResult,
     Mode,
     ReportDraft,
     SectionName,
 )
+from baulens.report.template import template_facts
 
 DEFAULT_TEMPLATE = "report_v2"
-DEFAULT_SLOT_TEMPLATE = "report_slots_v2"
+DEFAULT_NARRATIVE_TEMPLATE = "report_narrative_v1"
 
 
 class ChatMessage(BaseModel):
@@ -65,7 +68,7 @@ def load_prompt(name: str = DEFAULT_TEMPLATE) -> PromptTemplate:
     return PromptTemplate(
         name=name,
         version=str(data["version"]),
-        mode="slots" if data.get("mode") == "slots" else "free",
+        mode="narrative" if data.get("mode") == "narrative" else "free",
         digest=hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest(),
         system=str(data["system"]).strip(),
         user=str(data["user"]).strip(),
@@ -76,10 +79,12 @@ def load_prompt(name: str = DEFAULT_TEMPLATE) -> PromptTemplate:
     )
 
 
-def required_sections(sheet: FactSheet) -> tuple[SectionName, ...]:
-    """Sections a draft must contain for this case, in report order."""
+def required_sections(sheet: FactSheet, mode: Mode = "free") -> tuple[SectionName, ...]:
+    """Sections the model must write for this case, in report order."""
+    if mode == "narrative":
+        return NARRATIVE_SECTIONS
     case = sheet.case
-    skip: set[SectionName] = set()
+    skip: set[SectionName] = {"bewertung"}
     if case.strength is None:
         skip.add("druckfestigkeit")
     if case.crack is None:
@@ -87,53 +92,36 @@ def required_sections(sheet: FactSheet) -> tuple[SectionName, ...]:
     return tuple(name for name in SECTION_ORDER if name not in skip)
 
 
-def draft_schema(sheet: FactSheet) -> dict[str, Any]:
+def draft_schema(sheet: FactSheet, mode: Mode = "free") -> dict[str, Any]:
     """JSON schema passed to Ollama's ``format`` so that decoding follows the sections."""
-    names = required_sections(sheet)
+    names = required_sections(sheet, mode)
+    limit = MAX_NARRATIVE_CHARS if mode == "narrative" else MAX_SECTION_CHARS
     return {
         "type": "object",
         "properties": {
-            name: {"type": "string", "minLength": 1, "maxLength": MAX_SECTION_CHARS}
-            for name in names
+            name: {"type": "string", "minLength": 1, "maxLength": limit} for name in names
         },
         "required": list(names),
         "additionalProperties": False,
     }
 
 
-def _slot_lines(sheet: FactSheet) -> str:
-    lines = [f"- {{{fact.slot}}} = {fact.display} ({fact.label})" for fact in sheet.facts]
-    lines += [f"- {{{slot.slot}}} = {slot.text} ({slot.label})" for slot in sheet.text_slots]
-    return "\n".join(lines)
-
-
-_NUMERIC = re.compile(r"\d")
-
-
-def _info_lines(sheet: FactSheet) -> str:
-    """Fact-list lines without numbers (model names, domain flag, classification result)."""
-    lines = [
-        line
-        for group in sheet.groups
-        for line in group.lines
-        if not _NUMERIC.search(line.split(":", 1)[-1])
-    ]
-    return "\n".join(f"- {line}" for line in lines)
+def _findings_text(sheet: FactSheet) -> str:
+    return "\n\n".join(
+        f"{SECTION_TITLES[name]}: {text}" for name, text in template_facts(sheet).items()
+    )
 
 
 def initial_messages(sheet: FactSheet, prompt: PromptTemplate) -> list[ChatMessage]:
-    lines = [f"- {name}: {prompt.sections[name]}" for name in required_sections(sheet)]
-    sections = "\n".join(lines)
-    if sheet.case.strength is not None:
+    names = required_sections(sheet, prompt.mode)
+    sections = "\n".join(f"- {name}: {prompt.sections[name]}" for name in names)
+    if sheet.case.strength is not None and prompt.mode == "free":
         note = "in_domain" if sheet.case.strength.in_training_domain else "out_of_domain"
         sections += "\n\n" + prompt.notes[note]
-    template = Template(prompt.user)
-    if prompt.mode == "slots":
-        user = template.substitute(
-            slots=_slot_lines(sheet), info=_info_lines(sheet), sections=sections
-        )
-    else:
-        user = template.substitute(facts=sheet.render(), sections=sections)
+    values = {"facts": sheet.render(), "sections": sections}
+    if prompt.mode == "narrative":
+        values["befunde"] = _findings_text(sheet)
+    user = Template(prompt.user).substitute(values)
     return [
         ChatMessage(role="system", content=prompt.system),
         ChatMessage(role="user", content=user),
@@ -153,26 +141,55 @@ def correction_message(result: FaithfulnessResult, prompt: PromptTemplate) -> Ch
     )
 
 
-def parse_draft(text: str, sheet: FactSheet) -> ReportDraft:
-    """Validate a model reply against the draft schema and the sections this case needs."""
+def _load_object(text: str) -> dict[str, Any]:
+    """Parse a JSON object; every decoder failure becomes a ``DraftError``."""
     try:
         data = json.loads(text)
     except json.JSONDecodeError as error:
         raise DraftError(f"kein gültiges JSON ({error.msg} an Position {error.pos})") from error
+    except (ValueError, RecursionError) as error:
+        # e.g. integers beyond Python's digit limit, or pathological nesting
+        raise DraftError(f"JSON nicht verarbeitbar ({error.__class__.__name__})") from error
     if not isinstance(data, dict):
         raise DraftError("JSON-Objekt erwartet")
-    required = set(required_sections(sheet))
-    missing = sorted(required - data.keys())
-    extra = sorted(set(data) - required)
+    return data
+
+
+def _sections(data: dict[str, Any], required: tuple[SectionName, ...]) -> None:
+    missing = sorted(set(required) - data.keys())
+    extra = sorted(set(data) - set(required))
     if missing or extra:
         raise DraftError(f"fehlende Felder: {missing or '-'}; unzulässige Felder: {extra or '-'}")
+
+
+def _details(error: ValidationError) -> str:
+    return "; ".join(
+        f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}" for item in error.errors()
+    )
+
+
+def parse_draft(text: str, sheet: FactSheet) -> ReportDraft:
+    """Free-text mode: validate a reply against the draft schema of this case."""
+    data = _load_object(text)
+    _sections(data, required_sections(sheet, "free"))
     try:
         return ReportDraft.model_validate(
             {key: value.strip() if isinstance(value, str) else value for key, value in data.items()}
         )
     except ValidationError as error:
-        details = "; ".join(
-            f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
-            for item in error.errors()
-        )
-        raise DraftError(details) from error
+        raise DraftError(_details(error)) from error
+
+
+def parse_narrative(text: str) -> dict[SectionName, str]:
+    """Narrative mode: validate the three narrative fields."""
+    data = _load_object(text)
+    _sections(data, NARRATIVE_SECTIONS)
+    narrative: dict[SectionName, str] = {}
+    for name in NARRATIVE_SECTIONS:
+        value = data[name]
+        if not isinstance(value, str) or not value.strip():
+            raise DraftError(f"{name}: nicht leerer Text erwartet")
+        if len(value) > MAX_NARRATIVE_CHARS:
+            raise DraftError(f"{name}: höchstens {MAX_NARRATIVE_CHARS} Zeichen")
+        narrative[name] = value.strip()
+    return narrative

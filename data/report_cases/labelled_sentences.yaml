@@ -30,24 +30,22 @@ sentences:
   - {mode: free, correct: false, text: "Die Festigkeit entspricht C30/37."}
   - {mode: free, correct: false, text: "Die Risswahrscheinlichkeit beträgt 96,6 %-Punkte."}
   - {mode: free, correct: false, note: "negation (documented limit of free text)", text: "Die Druckfestigkeit beträgt nicht 37,9 MPa."}
-  # slots, correct
-  - {mode: slots, correct: true, text: "Die prognostizierte Druckfestigkeit beträgt {druckfestigkeit}."}
-  - {mode: slots, correct: true, text: "Das Prognoseintervall reicht von {untere_grenze} bis {obere_grenze}."}
-  - {mode: slots, correct: true, text: "Die Druckfestigkeit liegt zwischen {untere_grenze} und {obere_grenze}."}
-  - {mode: slots, correct: true, text: "Die Risswahrscheinlichkeit von {risswahrscheinlichkeit} liegt über der Entscheidungsschwelle von {entscheidungsschwelle}."}
-  - {mode: slots, correct: true, text: "Der Beitrag des Zements beträgt {beitrag_zement}, der des w/z-Werts {beitrag_w_z_wert}."}
-  - {mode: slots, correct: true, text: "Die Prognose ersetzt keine Prüfung nach {norm_druckfestigkeit}."}
-  - {mode: slots, correct: true, text: "Das Bild {bild} wurde am {aufnahmedatum} um {aufnahmezeit} aufgenommen."}
-  - {mode: slots, correct: true, note: "Markdown emphasis around a slot", text: "Die prognostizierte Druckfestigkeit beträgt **{druckfestigkeit}**."}
-  - {mode: slots, correct: true, note: "negation in another clause", text: "Die Risswahrscheinlichkeit beträgt {risswahrscheinlichkeit}; ein Riss ist nicht auszuschließen."}
-  # slots, wrong
-  - {mode: slots, correct: false, text: "Die Druckfestigkeit beträgt -{druckfestigkeit}."}
-  - {mode: slots, correct: false, text: "Die Druckfestigkeit beträgt {druckfestigkeit} kg."}
-  - {mode: slots, correct: false, text: "Der Beitrag des Betonalters beträgt {beitrag_zement}."}
-  - {mode: slots, correct: false, text: "Die Frist zur Behebung beträgt {betonalter}."}
-  - {mode: slots, correct: false, text: "Prüfdeadline ist der {aufnahmedatum}."}
-  - {mode: slots, correct: false, text: "Die Risswahrscheinlichkeit beträgt {risswahrscheinlichkeit}-Punkte."}
-  - {mode: slots, correct: false, text: "Die Druckfestigkeit beträgt nicht {druckfestigkeit}."}
-  - {mode: slots, correct: false, text: "Geprüft wurden ⑨ Bohrkerne."}
-  - {mode: slots, correct: false, text: "Geprüft wurde ein Dutzend Bohrkerne."}
-  - {mode: slots, correct: false, text: "Die Risswahrscheinlichkeit ist doppelt so hoch wie {entscheidungsschwelle}."}
+  # narrative, correct (no numbers, no findings)
+  - {mode: narrative, correct: true, text: "Die Prognose der Druckfestigkeit ist eine Modellschätzung und sollte durch eine Prüfung an Bohrkernen bestätigt werden."}
+  - {mode: narrative, correct: true, text: "Der Rissbefund beruht auf einem einzelnen Bildausschnitt und ersetzt keine Sichtprüfung vor Ort."}
+  - {mode: narrative, correct: true, text: "Eine sachkundige Person sollte das Bauteil handnah begutachten und die Befunde einordnen."}
+  - {mode: narrative, correct: true, text: "Die Befunde sind als Entwurf zu verstehen und vor einer Verwendung fachlich zu prüfen."}
+  - {mode: narrative, correct: true, text: "Die Modellschätzung kann eine normgerechte Druckfestigkeitsprüfung nicht ersetzen."}
+  - {mode: narrative, correct: true, note: "verb 'achten' read as an ordinal", text: "Bei der Probenahme ist auf saubere Bohrkerne zu achten."}
+  - {mode: narrative, correct: true, note: "'innerhalb' outside a domain statement", text: "Die Bewertung sollte innerhalb der üblichen Prüfabläufe erfolgen."}
+  # narrative, wrong (numbers or restated findings)
+  - {mode: narrative, correct: false, text: "Die Druckfestigkeit von 37,9 MPa ist plausibel."}
+  - {mode: narrative, correct: false, text: "Es wurde ein Riss erkannt, der saniert werden muss."}
+  - {mode: narrative, correct: false, text: "Die Risswahrscheinlichkeit liegt deutlich über der Schwelle."}
+  - {mode: narrative, correct: false, text: "Die Eingaben liegen innerhalb des Trainingsbereichs."}
+  - {mode: narrative, correct: false, text: "Die Druckfestigkeit ist ausreichend."}
+  - {mode: narrative, correct: false, text: "Ein zwölfprozentiger Zuschlag ist erforderlich."}
+  - {mode: narrative, correct: false, text: "Der Grenzwert ist ein Fünfzehntel."}
+  - {mode: narrative, correct: false, text: "Geprüft wurden Ⅻ Bohrkerne."}
+  - {mode: narrative, correct: false, text: "Die Druckfestigkeit beträgt {druckfestigkeit}."}
+  - {mode: narrative, correct: false, text: "Das Bauteil ist rissfrei."}

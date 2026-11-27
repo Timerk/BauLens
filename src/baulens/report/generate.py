@@ -2,14 +2,17 @@
 
 Two modes share one policy:
 
-``slots`` (production default)
-    The model writes prose with placeholders such as ``{druckfestigkeit}``; code inserts the
-    numbers. Any digit, number word, date or time the model writes itself is a violation,
-    and the rendered draft is checked again so that a placeholder in the wrong place
-    ("Die Druckfestigkeit beträgt {obere_grenze}") is caught as ``misattributed``.
-``free``
-    The model writes every number itself; the checker verifies form, unit and role. Kept as
-    the evaluated unconstrained baseline.
+``narrative`` (the delivery mode)
+    Code renders every finding (summary, strength, crack: all numbers, units, intervals,
+    comparisons, decisions, identifiers and dates). The model writes only an assessment,
+    limitations and recommendations; :mod:`baulens.report.narrative` rejects any numeral,
+    brace or restated finding in them. A rejected narrative is replaced by the template
+    narrative, so the delivered report is always code findings plus a checked or a template
+    narrative, labelled as such.
+``free`` (experimental, not a delivery mode)
+    The model writes every number itself and the checker verifies form, unit and role on a
+    best-effort basis. Kept as the evaluated unconstrained baseline; its known false
+    negatives are listed as ``xfail`` tests and in ``docs/results/report.md``.
 
 Policy:
 
@@ -33,6 +36,7 @@ from baulens.report.clients import GenerationOptions, LLMClient, LLMError
 from baulens.report.completeness import check_completeness
 from baulens.report.facts import FactSheet, build_facts
 from baulens.report.faithfulness import check_sections
+from baulens.report.narrative import check_narrative
 from baulens.report.prompting import (
     ChatMessage,
     DraftError,
@@ -42,10 +46,12 @@ from baulens.report.prompting import (
     initial_messages,
     load_prompt,
     parse_draft,
+    parse_narrative,
     schema_retry_message,
 )
 from baulens.report.replay import RecordingClient, ReplayClient, ReplayMissError
 from baulens.report.schemas import (
+    FACT_SECTIONS,
     Attempt,
     AttemptKind,
     FaithfulnessResult,
@@ -55,8 +61,7 @@ from baulens.report.schemas import (
     ReportResult,
     Status,
 )
-from baulens.report.slots import check_slot_sections, render_slots
-from baulens.report.template import TEMPLATE_PROVENANCE, template_report
+from baulens.report.template import TEMPLATE_PROVENANCE, template_facts, template_report
 from baulens.schemas import InspectionInput
 
 
@@ -74,23 +79,44 @@ def generation_options(config: ReportConfig) -> GenerationOptions:
     )
 
 
+FACTS_BY_CODE = "Befunde aus den Eingabedaten, von Code erzeugt"
+EXPERIMENTAL = "Experimentell (Freitext, Zahlenprüfung nach bestem Bemühen)"
+
+
 def prompt_for(config: ReportConfig, mode: Mode) -> PromptTemplate:
-    return load_prompt(config.slot_prompt_template if mode == "slots" else config.prompt_template)
+    name = config.narrative_prompt_template if mode == "narrative" else config.prompt_template
+    return load_prompt(name)
 
 
-def _provenance(client: LLMClient, mode: Mode, prompt: PromptTemplate) -> str:
+def _origin(client: LLMClient, prompt: PromptTemplate) -> str:
     kind = {
         "live": "Modellausgabe",
         "replay": "Aufgezeichnete Modellausgabe (Replay)",
         "fake": "Testausgabe",
         "template": "Vorlage",
     }[client.source]
-    return f"{kind} von {client.model}, Modus {mode}, Prompt {prompt.prompt_version}"
+    return f"{kind} von {client.model}, Prompt {prompt.prompt_version}"
 
 
-def _fallback(sheet: FactSheet, reason: str) -> InspectionReport:
+def _provenance(client: LLMClient, mode: Mode, prompt: PromptTemplate) -> str:
+    if mode == "narrative":
+        return (
+            f"{FACTS_BY_CODE}; Bewertung, Einschränkungen und Empfehlung: "
+            f"{_origin(client, prompt)}, geprüft auf Zahlen und Befunde"
+        )
+    return f"{EXPERIMENTAL}: {_origin(client, prompt)}"
+
+
+def _fallback(sheet: FactSheet, mode: Mode, reason: str) -> InspectionReport:
     report = template_report(sheet)
-    return report.model_copy(update={"provenance": f"{TEMPLATE_PROVENANCE} (Ersatz: {reason})"})
+    if mode == "narrative":
+        provenance = (
+            f"{FACTS_BY_CODE}; Bewertung, Einschränkungen und Empfehlung: Vorlage "
+            f"(Ersatz: {reason})"
+        )
+    else:
+        provenance = f"{TEMPLATE_PROVENANCE} (Ersatz: {reason})"
+    return report.model_copy(update={"provenance": provenance})
 
 
 def generate_template(
@@ -121,20 +147,34 @@ def generate_template(
 
 
 def _check(
-    raw: ReportDraft, sheet: FactSheet, mode: Mode
-) -> tuple[ReportDraft, FaithfulnessResult]:
-    """The draft to show and its check. Slot drafts are rendered before display."""
+    text: str, sheet: FactSheet, mode: Mode
+) -> tuple[ReportDraft, FaithfulnessResult, dict[str, str] | None]:
+    """Parse a reply, build the draft to show and check it.
+
+    Free text: the whole draft is the model's and is checked number by number. Narrative: the
+    findings come from code, the three narrative fields from the model and are checked for
+    numbers and findings. Every parsing or validation failure is a ``DraftError``.
+    """
     if mode == "free":
-        return raw, check_sections(raw.sections(), sheet)
-    result = check_slot_sections(raw.sections(), sheet)
-    rendered = {name: render_slots(text, sheet) for name, text in raw.sections().items()}
+        draft = parse_draft(text, sheet)
+        return draft, check_sections(draft.sections(), sheet), None
+    narrative = parse_narrative(text)
+    combined = {**template_facts(sheet), **narrative}
     try:
-        return ReportDraft.model_validate(rendered), result
+        draft = ReportDraft.model_validate(combined)
     except ValidationError as error:
-        # e.g. a long element name repeated through {bauteil} exceeds a section limit
-        raise DraftError(
-            f"nach dem Einsetzen der Platzhalter ungültig: {error.errors()[0]['msg']}"
-        ) from error
+        raise DraftError(f"Bericht ungültig: {error.errors()[0]['msg']}") from error
+    return draft, check_narrative(narrative), {str(k): v for k, v in narrative.items()}
+
+
+def facts_check(
+    draft: ReportDraft, final: FaithfulnessResult, sheet: FactSheet, mode: Mode
+) -> FaithfulnessResult:
+    """Which facts the report states; in narrative mode they are in the code findings."""
+    if mode == "free":
+        return final
+    facts = {name: text for name, text in draft.sections().items() if name in FACT_SECTIONS}
+    return check_sections(facts, sheet)
 
 
 def generate_report(
@@ -144,14 +184,14 @@ def generate_report(
     *,
     mode: Mode | None = None,
 ) -> ReportResult:
-    """Draft a report with ``client`` and deliver it only if every number is faithful."""
+    """Draft a report with ``client``; deliver model text only if it passes its check."""
     mode = mode or config.generation_mode
     sheet = build_facts(case)
     prompt = prompt_for(config, mode)
     digest = input_sha256(case)
     if isinstance(client, RecordingClient | ReplayClient):
         client.begin_case(case.case_id, digest, prompt.prompt_version)
-    schema = draft_schema(sheet)
+    schema = draft_schema(sheet, mode)
     options = generation_options(config)
     messages: list[ChatMessage] = initial_messages(sheet, prompt)
 
@@ -177,8 +217,7 @@ def generate_report(
             status, note = "error", f"Modellaufruf fehlgeschlagen: {error}"
             break
         try:
-            raw = parse_draft(response.text, sheet)
-            draft, final = _check(raw, sheet, mode)
+            draft, final, raw = _check(response.text, sheet, mode)
         except DraftError as error:
             attempts.append(Attempt(kind=kind, response=response, schema_error=str(error)))
             if schema_retries >= config.max_schema_retries:
@@ -201,16 +240,7 @@ def generate_report(
             provenance=_provenance(client, mode, prompt),
         )
         attempts.append(
-            Attempt(
-                kind=kind,
-                response=response,
-                violations=len(final.violations),
-                raw_draft=(
-                    {str(name): text for name, text in raw.sections().items()}
-                    if mode == "slots"
-                    else None
-                ),
-            )
+            Attempt(kind=kind, response=response, violations=len(final.violations), raw_draft=raw)
         )
         if final.faithful:
             status = "accepted"
@@ -226,7 +256,7 @@ def generate_report(
         kind = "correction"
 
     reasons = {
-        "rejected": "Zahlen nicht durch die Eingabe gedeckt",
+        "rejected": "Text nicht durch die Prüfung gedeckt",
         "invalid": "keine schemagültige Antwort",
         "error": "Modellaufruf fehlgeschlagen",
         "replay_miss": "keine aufgezeichnete Modellausgabe für diese Eingabe",
@@ -234,12 +264,11 @@ def generate_report(
     delivered = candidate if status == "accepted" and candidate is not None else None
     if delivered is None:
         reason = reasons.get(status, status)
-        note = f"{note + '; ' if note else ''}{reason}; Vorlagenbericht geliefert"
-    completeness = (
-        check_completeness(candidate, final, sheet)
-        if candidate is not None and final is not None
-        else None
-    )
+        note = f"{note + '; ' if note else ''}{reason}; Vorlagentext geliefert"
+    completeness = None
+    if candidate is not None and final is not None:
+        facts = facts_check(candidate.draft, final, sheet, mode)
+        completeness = check_completeness(candidate, facts, sheet)
     return ReportResult(
         case_id=case.case_id,
         input_sha256=digest,
@@ -248,7 +277,7 @@ def generate_report(
         mode=mode,
         prompt_version=prompt.prompt_version,
         status=status,
-        delivered=delivered or _fallback(sheet, reasons.get(status, status)),
+        delivered=delivered or _fallback(sheet, mode, reasons.get(status, status)),
         candidate=candidate,
         initial_faithfulness=initial,
         faithfulness=final,

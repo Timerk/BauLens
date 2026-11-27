@@ -92,11 +92,11 @@ class CracksConfig(PipelineConfig):
         return self
 
 
-GenerationMode = Literal["free", "slots"]
+GenerationMode = Literal["free", "narrative"]
 
 
 def _both_modes() -> list[GenerationMode]:
-    return ["free", "slots"]
+    return ["free", "narrative"]
 
 
 class ReportConfig(PipelineConfig):
@@ -106,10 +106,10 @@ class ReportConfig(PipelineConfig):
     temperature: float = Field(ge=0, le=2)
     max_tokens: PositiveInt
     num_ctx: PositiveInt = 4096
-    generation_mode: GenerationMode = "slots"
+    generation_mode: GenerationMode = "narrative"
     compare_modes: list[GenerationMode] = Field(default_factory=_both_modes, min_length=1)
     prompt_template: str = Field(default="report_v2", pattern=r"^[a-z0-9_]+$")
-    slot_prompt_template: str = Field(default="report_slots_v2", pattern=r"^[a-z0-9_]+$")
+    narrative_prompt_template: str = Field(default="report_narrative_v1", pattern=r"^[a-z0-9_]+$")
     default_model: str = Field(
         default="gemma3:4b", description="Model for `report generate`; `models` is compared"
     )

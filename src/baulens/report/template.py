@@ -1,15 +1,34 @@
-"""Deterministic report text without a language model: the safe default and the baseline.
+"""Deterministic report text without a language model.
 
-The template only inserts ``Fact.display`` strings, so it passes the faithfulness check by
-construction; the tests assert that for every evaluation case.
+The template renders the findings ("Befunde": summary, strength, crack) for every delivered
+report and provides the fallback narrative. It only inserts ``Fact.display`` strings, so it
+passes the free-text check by construction; the tests assert that for every evaluation case.
+Free-text metadata (model names, versions, file and element names) is shortened to
+:data:`MAX_METADATA_CHARS` so that no section can exceed its length limit.
 """
 
 from baulens.report.facts import Fact, FactSheet
-from baulens.report.schemas import InspectionReport, ReportDraft
+from baulens.report.schemas import (
+    FACT_SECTIONS,
+    NARRATIVE_SECTIONS,
+    InspectionReport,
+    ReportDraft,
+    SectionName,
+)
 
 TEMPLATE_GENERATOR = "template"
 TEMPLATE_PROVENANCE = "Vorlagenbericht ohne Sprachmodell"
 _BORDERLINE = 0.05
+MAX_METADATA_CHARS = 120
+TEMPLATE_ASSESSMENT = (
+    "Eine sprachliche Bewertung durch ein Sprachmodell liegt nicht vor. Maßgeblich sind die "
+    "oben aufgeführten Befunde, die vor jeder Verwendung fachlich zu prüfen sind."
+)
+
+
+def short(text: str, limit: int = MAX_METADATA_CHARS) -> str:
+    """Shorten free-text metadata for display; the full value stays in the input."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _shown(sheet: FactSheet, field: str) -> str:
@@ -22,7 +41,7 @@ def _shown(sheet: FactSheet, field: str) -> str:
 def _subject(sheet: FactSheet) -> str:
     case = sheet.case
     if case.image is not None and case.image.element:
-        return f"das Bauteil „{case.image.element}“ (Fall {case.case_id})"
+        return f"das Bauteil „{short(case.image.element)}“ (Fall {case.case_id})"
     return f"den Fall {case.case_id}"
 
 
@@ -56,7 +75,8 @@ def template_draft(sheet: FactSheet) -> ReportDraft:
             f"Für die angegebene Betonrezeptur mit {_shown(sheet, 'mix.cement')} Zement, "
             f"{_shown(sheet, 'mix.water')} Wasser (w/z-Wert "
             f"{_shown(sheet, 'mix.water_cement_ratio')}) und einem Betonalter von {age} "
-            f"prognostiziert das Modell {strength.model_name} (Version {strength.model_version}) "
+            f"prognostiziert das Modell {short(strength.model_name)} "
+            f"(Version {short(strength.model_version)}) "
             f"eine Druckfestigkeit von {point}. "
             f"Das Prognoseintervall mit einer nominellen Überdeckung von {coverage} reicht von "
             f"{lower} bis {upper}. {domain}"
@@ -86,11 +106,15 @@ def template_draft(sheet: FactSheet) -> ReportDraft:
             else f"Für {_subject(sheet)} ergibt die automatische Bildauswertung bei einer "
             f"Risswahrscheinlichkeit von {probability}: {verdict}."
         )
-        image = f"Das Bild {case.image.filename}" if case.image is not None else "Das Bild"
+        image = f"Das Bild {short(case.image.filename)}" if case.image is not None else "Das Bild"
+        side = "über" if found else "unter"
+        if crack.crack_probability == crack.threshold:
+            side = "auf"
         crack_text = (
-            f"{image} wurde vom Modell {crack.model_name} (Version {crack.model_version}) "
-            f"mit einer Risswahrscheinlichkeit von "
+            f"{image} wurde vom Modell {short(crack.model_name)} "
+            f"(Version {short(crack.model_version)}) mit einer Risswahrscheinlichkeit von "
             f"{probability} bewertet; die Entscheidungsschwelle liegt bei {threshold}. "
+            f"Die Risswahrscheinlichkeit liegt damit {side} der Entscheidungsschwelle. "
             f"Ergebnis der Klassifikation: {verdict}."
         )
         if abs(crack.crack_probability - crack.threshold) < _BORDERLINE:
@@ -123,6 +147,7 @@ def template_draft(sheet: FactSheet) -> ReportDraft:
         zusammenfassung=" ".join(summary),
         druckfestigkeit=strength_text,
         rissbefund=crack_text,
+        bewertung=TEMPLATE_ASSESSMENT,
         einschraenkungen=" ".join(limits),
         empfehlung=" ".join(advice),
     )
@@ -135,3 +160,15 @@ def template_report(sheet: FactSheet) -> InspectionReport:
         generator=TEMPLATE_GENERATOR,
         provenance=TEMPLATE_PROVENANCE,
     )
+
+
+def template_facts(sheet: FactSheet) -> dict[SectionName, str]:
+    """The code-rendered findings of a report ("Befunde")."""
+    sections = template_draft(sheet).sections()
+    return {name: text for name, text in sections.items() if name in FACT_SECTIONS}
+
+
+def template_narrative(sheet: FactSheet) -> dict[SectionName, str]:
+    """The deterministic fallback narrative (assessment, limitations, recommendation)."""
+    sections = template_draft(sheet).sections()
+    return {name: text for name, text in sections.items() if name in NARRATIVE_SECTIONS}

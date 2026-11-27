@@ -1,10 +1,9 @@
 """Guarded generation with scripted model replies, including unfaithful ones."""
 
-import json
 from pathlib import Path
 
 import pytest
-from report_helpers import both_case, crack_case, strength_case, template_reply
+from report_helpers import both_case, crack_case, narrative_reply, strength_case, template_reply
 
 from baulens.config import ReportConfig, load_config
 from baulens.report.clients import FakeClient, LLMError
@@ -42,9 +41,7 @@ FREE = CONFIG.model_copy(update={"generation_mode": "free"})
 
 
 def faithful_reply(case: InspectionInput, **changes: str) -> str:
-    draft = template_draft(build_facts(case)).model_dump(exclude_none=True)
-    draft.update(changes)
-    return json.dumps(draft, ensure_ascii=False)
+    return template_reply(case, **changes)
 
 
 def test_prompt_lists_the_facts_and_sections() -> None:
@@ -131,7 +128,7 @@ def test_persistently_unfaithful_report_is_rejected_never_delivered() -> None:
     assert result.delivered.generator == "template"
     assert result.candidate is not None and "65,3" in result.candidate.draft.zusammenfassung
     assert result.faithfulness is not None and not result.faithfulness.faithful
-    assert result.note is not None and "Vorlagenbericht" in result.note
+    assert result.note is not None and "Vorlagentext" in result.note
 
 
 def test_invalid_json_gets_one_schema_retry_then_fails_cleanly() -> None:
@@ -260,52 +257,20 @@ def test_in_domain_case_must_not_be_declared_out_of_domain(sentence: str, consis
     assert item.satisfied is consistent
 
 
-def slot_reply(case: InspectionInput, **changes: str) -> str:
-    return template_reply(case, slots=True, **changes)
-
-
-def test_slot_mode_inserts_numbers_by_code() -> None:
-    case = both_case()
-    reply = slot_reply(case)
-    assert "61,9" not in reply and "{druckfestigkeit}" in reply and "MPa" not in reply
-    client = FakeClient([reply], model="fake-s")
-    result = generate_report(case, client, CONFIG)
-    assert CONFIG.generation_mode == "slots" and result.mode == "slots"
-    assert result.status == "accepted", result.faithfulness
-    assert "61,9 MPa" in result.delivered.draft.zusammenfassung
-    assert result.attempts[0].raw_draft is not None
-    assert "{druckfestigkeit}" in result.attempts[0].raw_draft["zusammenfassung"]
-    assert "{druckfestigkeit}" in client.calls[0][1].content
-    assert "Modus slots" in result.delivered.to_markdown()
-
-
-def test_slot_mode_rejects_literal_numbers_and_misplaced_slots() -> None:
-    case = strength_case()
-    literal = slot_reply(case, empfehlung="Es sind drei Bohrkerne nach 28 Tagen zu prüfen.")
-    corrected = generate_report(case, FakeClient([literal, slot_reply(case)]), CONFIG)
-    assert corrected.status == "accepted"
-    first = corrected.initial_faithfulness
-    assert first is not None
-    assert [check.reason for check in first.violations] == ["Zahl außerhalb eines Platzhalters"] * 2
-
-    misplaced = slot_reply(case, zusammenfassung="Die Druckfestigkeit beträgt {obere_grenze}.")
-    rejected = generate_report(case, FakeClient([misplaced, misplaced]), CONFIG)
-    assert rejected.status == "rejected" and rejected.fallback_used
-    assert rejected.faithfulness is not None
-    assert [check.status for check in rejected.faithfulness.violations] == ["misattributed"]
-
-
 def test_delivered_markdown_carries_its_provenance(tmp_path: Path) -> None:
     case = crack_case()
     live = generate_report(case, FakeClient([faithful_reply(case)], model="m"), FREE)
-    assert "Testausgabe von m" in live.delivered.to_markdown()
+    assert "Experimentell" in live.delivered.to_markdown()
+    narrative = generate_report(case, FakeClient([narrative_reply()], model="m"), CONFIG)
+    assert "von Code erzeugt" in narrative.delivered.to_markdown()
+    assert "Testausgabe von m" in narrative.delivered.to_markdown()
     template = generate_template(case).delivered.to_markdown()
     assert "Herkunft: Vorlagenbericht ohne Sprachmodell" in template
 
 
 def test_replay_lookup_uses_the_full_input_identity(tmp_path: Path) -> None:
     case = crack_case()
-    recorder = RecordingClient(FakeClient([slot_reply(case)], model="m"))
+    recorder = RecordingClient(FakeClient([narrative_reply()], model="m"))
     generate_report(case, recorder, CONFIG)
     write_records(replay_path(tmp_path, "m"), recorder.records)
     replay = ReplayClient.from_directory(tmp_path, "m")
@@ -313,8 +278,8 @@ def test_replay_lookup_uses_the_full_input_identity(tmp_path: Path) -> None:
     assert case.image is not None
     changed = case.model_copy(update={"image": case.image.model_copy(update={"sha256": "a" * 64})})
     # Same messages (the hash is not in the prompt), but a different input: a miss.
-    assert initial_messages(build_facts(changed), load_prompt("report_slots_v2")) == (
-        initial_messages(build_facts(case), load_prompt("report_slots_v2"))
+    assert initial_messages(build_facts(changed), load_prompt("report_narrative_v1")) == (
+        initial_messages(build_facts(case), load_prompt("report_narrative_v1"))
     )
     assert generate_report(changed, replay, CONFIG).status == "replay_miss"
 
@@ -331,17 +296,3 @@ def test_crack_finding_must_be_stated_explicitly() -> None:
     report = InspectionReport(case_id=case.case_id, draft=draft, generator="fake")
     result = check_completeness(report, check_sections(draft.sections(), sheet), sheet)
     assert "crack_label" in result.missing and result.score < 1.0
-
-
-def test_slot_expansion_beyond_the_section_limit_falls_back() -> None:
-    """A long element name repeated through {bauteil} must not crash generate_report."""
-    image = crack_case().image
-    assert image is not None
-    long_image = image.model_copy(update={"element": "Stütze " + "a" * 110})
-    case = InspectionInput(case_id="PB-040", image=long_image, crack=crack_case().crack)
-    long_summary = "; ".join(["{bauteil}"] * 18)
-    reply = slot_reply(case, zusammenfassung=long_summary)
-    result = generate_report(case, FakeClient([reply, reply]), CONFIG)
-    assert result.status == "invalid" and result.fallback_used
-    assert result.attempts[0].schema_error is not None
-    assert "Platzhalter" in result.attempts[0].schema_error

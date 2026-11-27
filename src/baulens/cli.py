@@ -225,7 +225,7 @@ def cracks_benchmark(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None
 
 
 class GenerationChoice(StrEnum):
-    SLOTS = "slots"
+    NARRATIVE = "narrative"
     FREE = "free"
 
 
@@ -276,7 +276,10 @@ def report_generate(
     ] = None,
     generation: Annotated[
         GenerationChoice | None,
-        typer.Option(help="slots (numbers inserted by code) or free; default from config."),
+        typer.Option(
+            help="narrative (findings by code, the delivery mode) or free (experimental); "
+            "default from config."
+        ),
     ] = None,
     config_path: ReportConfigOption = Path("configs/report.yaml"),
     as_json: Annotated[bool, typer.Option("--json", help="Print the full ReportResult.")] = False,
@@ -309,6 +312,8 @@ def report_generate(
     if as_json:
         typer.echo(result.model_dump_json(indent=2))
         return
+    if chosen == "free" and selected is not ReportMode.TEMPLATE:
+        _say(console, "EXPERIMENTELL: Freitext-Modus, Zahlenprüfung nach bestem Bemühen.")
     _say(console, result.delivered.to_markdown())
     _say(
         console,
@@ -364,6 +369,10 @@ def report_compare(
         CompareSource,
         typer.Option(help="live: query Ollama; replay: re-score the recorded replies offline."),
     ] = CompareSource.LIVE,
+    modes: Annotated[
+        list[GenerationChoice] | None,
+        typer.Option("--mode", help="Generation modes to compare (repeatable); default config."),
+    ] = None,
     resume: Annotated[
         Path | None,
         typer.Option(help="Earlier run directory; reuse its complete models.", file_okay=False),
@@ -371,6 +380,8 @@ def report_compare(
 ) -> None:
     """Compare the configured local models on all evaluation cases."""
     config = load_config(config_path, ReportConfig)
+    if modes:
+        config = config.model_copy(update={"compare_modes": [mode.value for mode in modes]})
     if not update_docs:
         config = config.model_copy(update={"results_doc": None, "figures_dir": None})
     host = str(Settings().ollama_host)
