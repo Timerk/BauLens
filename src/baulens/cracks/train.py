@@ -8,7 +8,9 @@ import math
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Any, TypedDict
 
 import pandas as pd
 import torch
@@ -55,6 +57,38 @@ class EpochLog:
     val_f1: float
     learning_rate: float
     seconds: float
+
+
+class RunIdentity(TypedDict):
+    config: dict[str, Any]
+    data_checksum: str
+    split_checksum: str
+
+
+class Checkpoint(TypedDict):
+    identity: RunIdentity
+    revision: tuple[str, bool]
+    device: str
+    torch_version: str
+    torchvision_version: str
+    history: list[dict[str, Any]]
+    model: dict[str, torch.Tensor]
+    best_model: dict[str, torch.Tensor]
+    best_epoch: int
+    stale: int
+    optimizer: dict[str, Any]
+    scheduler: dict[str, Any]
+    elapsed: float
+
+
+def _save_checkpoint(path: Path, state: Checkpoint) -> None:
+    with NamedTemporaryFile(dir=path.parent, delete=False) as output:
+        staged = Path(output.name)
+    try:
+        torch.save(state, staged)
+        staged.replace(path)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -147,8 +181,9 @@ def train(config: CracksConfig) -> TrainResult:
         paths.root / "train_subset.csv", index=False, lineterminator="\n"
     )
 
+    train_dataset = CrackImageDataset.from_frame(data_dir, train_frame, train_transform(config))
     train_loader = make_loader(
-        CrackImageDataset.from_frame(data_dir, train_frame, train_transform(config)),
+        train_dataset,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
@@ -162,26 +197,71 @@ def train(config: CracksConfig) -> TrainResult:
         seed=config.seed,
     )
 
-    model = build_model(config.architecture, config.pretrained).to(device)
+    checkpoint_path = paths.root / "training_checkpoint.pt"
+    run_identity: RunIdentity = {
+        "config": config.model_dump(mode="json"),
+        "data_checksum": data_checksum(manifest),
+        "split_checksum": split_checksum(manifest),
+    }
+    checkpoint: Checkpoint | None = None
+    if config.resumable and checkpoint_path.exists():
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        if (
+            checkpoint["identity"] != run_identity
+            or checkpoint["device"] != str(device)
+            or checkpoint["torch_version"] != torch.__version__
+            or checkpoint["torchvision_version"] != torchvision.__version__
+        ):
+            raise ValueError(f"Training checkpoint does not match this run: {checkpoint_path}")
+        logger.info("Resuming %s after epoch %d", checkpoint_path, len(checkpoint["history"]))
+
+    model = build_model(config.architecture, config.pretrained and checkpoint is None).to(device)
     history: list[EpochLog] = []
-    best_state = copy.deepcopy(model.state_dict())
     best_loss, best_f1, best_epoch = math.inf, 0.0, 0
+    previous_elapsed = 0.0
+    best_state = copy.deepcopy(model.state_dict())
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint["model"])
+        best_state = checkpoint["best_model"]
+        history = [EpochLog(**row) for row in checkpoint["history"]]
+        best_epoch = checkpoint["best_epoch"]
+        best_loss, best_f1 = history[best_epoch - 1].val_loss, history[best_epoch - 1].val_f1
+        git_sha, git_dirty = checkpoint["revision"]
+        previous_elapsed = checkpoint["elapsed"]
     phases = [
         ("head", 0, config.head_epochs, config.lr_head),
         ("finetune", config.finetune_blocks, config.epochs, config.lr_finetune),
     ]
-    epoch = 0
+    epoch = len(history)
     for phase, blocks, epochs, learning_rate in phases:
-        if epochs == 0:
+        completed = sum(row.phase == phase for row in history)
+        if completed >= epochs:
             continue
+        continuing = checkpoint is not None and history[-1].phase == phase
+        stale = checkpoint["stale"] if checkpoint is not None and continuing else 0
+        if phase == "finetune" and stale >= config.patience:
+            break
         trainable = configure_trainable(model, config.architecture, blocks)
         optimizer, scheduler = _optimizer(
             model, learning_rate, config.weight_decay, epochs * len(train_loader)
         )
-        stale = 0
-        for _ in range(epochs):
+        if checkpoint is not None and continuing:
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            scheduler.load_state_dict(checkpoint["scheduler"])
+        for _ in range(completed, epochs):
             epoch += 1
             epoch_start = time.perf_counter()
+            if config.resumable:
+                # Recreate workers from the epoch seed so augmentation and shuffle resume exactly.
+                epoch_seed = config.seed + epoch
+                torch.manual_seed(epoch_seed)
+                train_loader = make_loader(
+                    train_dataset,
+                    batch_size=config.batch_size,
+                    shuffle=True,
+                    num_workers=config.num_workers,
+                    seed=epoch_seed,
+                )
             set_train_mode(model, trainable)
             train_loss, train_acc, _ = run_epoch(model, train_loader, device, optimizer, scheduler)
             model.eval()
@@ -213,18 +293,38 @@ def train(config: CracksConfig) -> TrainResult:
                 best_state = copy.deepcopy(model.state_dict())
                 # Best-so-far weights for inspection after an interruption. This file is
                 # never published: only the complete artifact below becomes a generation.
-                torch.save(
-                    {k: v.cpu() for k, v in best_state.items()}, paths.checkpoint_in_progress
-                )
+                if not config.resumable:
+                    torch.save(
+                        {k: v.cpu() for k, v in best_state.items()}, paths.checkpoint_in_progress
+                    )
             else:
                 stale += 1
-                if phase == "finetune" and stale >= config.patience:
-                    break
+            if config.resumable:
+                _save_checkpoint(
+                    checkpoint_path,
+                    Checkpoint(
+                        identity=run_identity,
+                        revision=(git_sha, git_dirty),
+                        device=str(device),
+                        torch_version=str(torch.__version__),
+                        torchvision_version=str(torchvision.__version__),
+                        history=[asdict(row) for row in history],
+                        model=model.state_dict(),
+                        best_model=best_state,
+                        best_epoch=best_epoch,
+                        stale=stale,
+                        optimizer=optimizer.state_dict(),
+                        scheduler=scheduler.state_dict(),
+                        elapsed=previous_elapsed + time.perf_counter() - started,
+                    ),
+                )
+            if phase == "finetune" and stale >= config.patience:
+                break
 
     model.load_state_dict(best_state)
     weights = io.BytesIO()
     torch.save({k: v.cpu() for k, v in model.state_dict().items()}, weights)
-    wall_clock = time.perf_counter() - started
+    wall_clock = previous_elapsed + time.perf_counter() - started
 
     frame = pd.DataFrame([asdict(row) for row in history])
     frame.to_csv(paths.root / "history.csv", index=False, lineterminator="\n")
@@ -255,8 +355,8 @@ def train(config: CracksConfig) -> TrainResult:
         normalization_mean=IMAGENET_MEAN,
         normalization_std=IMAGENET_STD,
         pretrained_weights=weights_name(config.architecture, config.pretrained),
-        data_checksum=data_checksum(manifest),
-        split_checksum=split_checksum(manifest),
+        data_checksum=run_identity["data_checksum"],
+        split_checksum=run_identity["split_checksum"],
         split_settings=split_settings(config),
         git_sha=git_sha,
         git_dirty=git_dirty,
@@ -272,4 +372,6 @@ def train(config: CracksConfig) -> TrainResult:
     (paths.root / "train_result.json").write_text(
         json.dumps(asdict(result), indent=2), encoding="utf-8"
     )
+    if config.resumable:
+        checkpoint_path.unlink(missing_ok=True)
     return result

@@ -64,6 +64,7 @@ class CracksConfig(PipelineConfig):
     lr_finetune: float = Field(default=2e-4, gt=0)
     weight_decay: float = Field(default=1e-4, ge=0)
     patience: PositiveInt = 2
+    resumable: bool = False
 
     # Augmentation
     crop_scale_min: float = Field(default=0.6, gt=0, le=1)

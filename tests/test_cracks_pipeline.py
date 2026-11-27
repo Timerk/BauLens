@@ -304,3 +304,53 @@ def test_gradcam_is_safe_under_concurrent_requests(smoke_run: SmokeRun) -> None:
     for thread in threads:
         thread.join()
     assert failures == []
+
+
+def test_resumable_training_matches_uninterrupted_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from baulens.cracks import train as train_module
+
+    config = load_config(Path("configs/smoke/cracks.yaml"), CracksConfig).model_copy(
+        update={
+            "data_dir": make_synthetic_cracks(
+                tmp_path / "data", per_class=12, image_size=64, seed=42
+            ),
+            "artifacts_dir": tmp_path / "resumed",
+            "epochs": 2,
+            "resumable": True,
+        }
+    )
+    save = train_module._save_checkpoint
+
+    def interrupt_after_first_finetune_epoch(path: Path, state: train_module.Checkpoint) -> None:
+        save(path, state)
+        if len(state["history"]) == 2:
+            raise InterruptedError("simulated interruption")
+
+    monkeypatch.setattr(train_module, "_save_checkpoint", interrupt_after_first_finetune_epoch)
+    with pytest.raises(InterruptedError):
+        train_module.train(config)
+    checkpoint = config.artifacts_dir / "training_checkpoint.pt"
+    assert checkpoint.is_file()
+    with pytest.raises(ValueError, match="checkpoint does not match"):
+        train_module.train(config.model_copy(update={"batch_size": 4}))
+
+    monkeypatch.setattr(train_module, "_save_checkpoint", save)
+    resumed = train_module.train(config)
+    uninterrupted = train_module.train(
+        config.model_copy(update={"artifacts_dir": tmp_path / "uninterrupted"})
+    )
+    assert not checkpoint.exists()
+    assert resumed.epochs_run == uninterrupted.epochs_run == 3
+    assert resumed.best_epoch == uninterrupted.best_epoch
+    assert resumed.best_val_loss == uninterrupted.best_val_loss
+    for result in (resumed, uninterrupted):
+        published = load_published(Path(result.model_dir))
+        weights = torch.load(io.BytesIO(published.weights), map_location="cpu", weights_only=True)
+        if result is resumed:
+            resumed_weights = weights
+        else:
+            assert all(
+                torch.equal(tensor, resumed_weights[name]) for name, tensor in weights.items()
+            )
