@@ -87,13 +87,16 @@ def _robustness(
     data_dir = project_path(config.data_dir)
     labels = subset["label"].to_numpy(dtype=np.int64)
     corruptions: list[tuple[str, Perturbation | None]] = [("none", None)]
-    corruptions += [(c.label, c) for c in default_corruptions(config.seed)]
+    corruptions.extend((c.label, c) for c in default_corruptions(config.seed))
     rows: list[dict[str, Any]] = []
     for label, corruption in corruptions:
-        dataset = CrackImageDataset.from_frame(
-            data_dir, subset, EvalTransform(config.image_size), corruption
-        )
-        probabilities = predict_probabilities(model, dataset, config, device)
+        if corruption is None:
+            probabilities = subset["probability"].to_numpy(dtype=np.float64)
+        else:
+            dataset = CrackImageDataset.from_frame(
+                data_dir, subset, EvalTransform(config.image_size), corruption
+            )
+            probabilities = predict_probabilities(model, dataset, config, device)
         metrics = binary_metrics(labels, probabilities, threshold)
         rows.append(
             {"corruption": label, "images": len(subset)}
@@ -156,26 +159,26 @@ def evaluate(config: CracksConfig) -> EvaluationResult:
     model = model_from_weights(metadata.architecture, published.weights, device)
     transform = EvalTransform(config.image_size)
 
-    frames: dict[str, pd.DataFrame] = {}
-    for split in ("val", "test"):
+    def score_split(split: str) -> pd.DataFrame:
         frame = manifest[manifest["split"] == split].reset_index(drop=True)
         dataset = CrackImageDataset.from_frame(data_dir, frame, transform)
-        frames[split] = frame.assign(
-            probability=predict_probabilities(model, dataset, config, device)
-        )
+        probabilities = predict_probabilities(model, dataset, config, device)
         logger.info("predicted %d %s images", len(frame), split)
-    predictions = pd.concat([frames["val"], frames["test"]]).assign(
-        split=["val"] * len(frames["val"]) + ["test"] * len(frames["test"])
-    )
+        return frame.assign(probability=probabilities)
+
+    val = score_split("val")
+    val_labels = val["label"].to_numpy(dtype=np.int64)
+    val_probs = val["probability"].to_numpy()
+    threshold = choose_threshold(val_labels, val_probs, config.threshold_strategy)
+    logger.info("validation threshold: %.3f", threshold)
+
+    test = score_split("test")
+    test_labels = test["label"].to_numpy(dtype=np.int64)
+    test_probs = test["probability"].to_numpy()
+    predictions = pd.concat([val, test])
     predictions[["path", "label", "split", "probability"]].to_csv(
         paths.root / "predictions.csv", index=False, lineterminator="\n"
     )
-
-    val_labels = frames["val"]["label"].to_numpy(dtype=np.int64)
-    val_probs = frames["val"]["probability"].to_numpy()
-    threshold = choose_threshold(val_labels, val_probs, config.threshold_strategy)
-    test_labels = frames["test"]["label"].to_numpy(dtype=np.int64)
-    test_probs = frames["test"]["probability"].to_numpy()
     val_metrics = binary_metrics(val_labels, val_probs, threshold)
     test_metrics = binary_metrics(test_labels, test_probs, threshold)
     plateau = optimal_threshold_ranges(val_labels, val_probs, config.threshold_strategy)
@@ -194,7 +197,7 @@ def evaluate(config: CracksConfig) -> EvaluationResult:
         threshold,
         resamples=config.bootstrap_resamples,
         seed=config.seed,
-        groups=frames["test"]["group"].to_numpy(dtype=np.int64),
+        groups=test["group"].to_numpy(dtype=np.int64),
     )
     test_calibration = calibration(test_labels, test_probs, config.calibration_bins)
     val_calibration = calibration(val_labels, val_probs, config.calibration_bins)
@@ -209,10 +212,9 @@ def evaluate(config: CracksConfig) -> EvaluationResult:
         test_calibration, figures.targets(config, "reliability_test.png"), "Test calibration"
     )
 
-    robustness = _robustness(model, frames["test"], threshold, config, device)
+    robustness = _robustness(model, test, threshold, config, device)
     figures.robustness(robustness, figures.targets(config, "robustness.png"))
 
-    test = frames["test"]
     predicted = test["probability"] >= threshold
     positive = test["label"] == 1
     k = config.gallery_size
@@ -269,7 +271,7 @@ def evaluate(config: CracksConfig) -> EvaluationResult:
         "test_ci95_image_level": {
             k: (round(lo, 6), round(hi, 6)) for k, (lo, hi) in image_intervals.items()
         },
-        "test_groups": int(frames["test"]["group"].nunique()),
+        "test_groups": int(test["group"].nunique()),
         "threshold_optimal_ranges": plateau,
         "threshold_leave_one_out": {
             "method": "exact, every validation image removed once",
@@ -280,8 +282,8 @@ def evaluate(config: CracksConfig) -> EvaluationResult:
         "val_ece": round(val_calibration.ece, 6),
         "test_calibration": asdict(test_calibration),
         "bootstrap_resamples": config.bootstrap_resamples,
-        "val_images": len(frames["val"]),
-        "test_images": len(frames["test"]),
+        "val_images": len(val),
+        "test_images": len(test),
     }
     write_json_atomic(paths.root / "evaluation.json", json_safe(report))
     metadata.threshold = threshold
