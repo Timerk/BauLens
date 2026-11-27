@@ -5,9 +5,12 @@ import io
 import json
 import logging
 import math
+import os
+import platform
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, TypedDict
@@ -15,6 +18,7 @@ from typing import Any, TypedDict
 import pandas as pd
 import torch
 import torchvision  # type: ignore[import-untyped]
+from filelock import FileLock
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -30,7 +34,7 @@ from baulens.cracks.data import (
     stratified_sample,
     train_transform,
 )
-from baulens.cracks.metadata import ModelMetadata, git_revision, publish_model, run_paths
+from baulens.cracks.metadata import ModelMetadata, RunPaths, git_revision, publish_model, run_paths
 from baulens.cracks.model import (
     build_model,
     configure_trainable,
@@ -39,11 +43,27 @@ from baulens.cracks.model import (
     set_train_mode,
     weights_name,
 )
-from baulens.cracks.splits import data_checksum, ensure_splits, split_checksum, split_settings
+from baulens.cracks.splits import (
+    data_checksum,
+    ensure_splits,
+    ordered_samples_checksum,
+    split_checksum,
+    split_settings,
+)
 from baulens.paths import project_path
 from baulens.seed import seed_everything
 
 logger = logging.getLogger(__name__)
+CHECKPOINT_FORMAT_VERSION = 1
+_TRAINING_SOURCES = (
+    "config.py",
+    "paths.py",
+    "seed.py",
+    "cracks/data.py",
+    "cracks/model.py",
+    "cracks/splits.py",
+    "cracks/train.py",
+)
 
 
 @dataclass(frozen=True)
@@ -59,18 +79,72 @@ class EpochLog:
     seconds: float
 
 
+class Accelerator(TypedDict):
+    backend: str
+    device_name: str
+    device_index: int | None
+    device_uuid: str | None
+    visible_devices: dict[str, str]
+    runtime_version: str | None
+    torch_version: str
+    torchvision_version: str
+    threads: int
+
+
+def _accelerator(device: torch.device) -> Accelerator:
+    index = None
+    uuid = None
+    visible_devices: dict[str, str] = {}
+    name = platform.processor() or platform.machine()
+    backend, runtime_version = "cpu", None
+    if device.type == "cuda":
+        index = device.index if device.index is not None else torch.cuda.current_device()
+        properties = torch.cuda.get_device_properties(index)
+        name = properties.name
+        uuid = str(properties.uuid) if getattr(properties, "uuid", None) is not None else None
+        backend = "rocm" if torch.version.hip else "cuda"
+        runtime_version = torch.version.hip or torch.version.cuda
+        visible_devices = {
+            key: os.environ[key]
+            for key in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+            if key in os.environ
+        }
+    return Accelerator(
+        backend=backend,
+        device_name=name,
+        device_index=index,
+        device_uuid=uuid,
+        visible_devices=visible_devices,
+        runtime_version=runtime_version,
+        torch_version=str(torch.__version__),
+        torchvision_version=str(torchvision.__version__),
+        threads=torch.get_num_threads(),
+    )
+
+
+def _source_fingerprint() -> str:
+    """Hash the training sources with normalized line endings for checkout portability."""
+    root = Path(__file__).resolve().parents[1]
+    sources = {
+        name: sha256((root / name).read_text(encoding="utf-8").encode()).hexdigest()
+        for name in _TRAINING_SOURCES
+    }
+    return sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()
+
+
 class RunIdentity(TypedDict):
     config: dict[str, Any]
     data_checksum: str
     split_checksum: str
+    ordered_samples_checksum: str
+    source_fingerprint: str
+    accelerator: Accelerator
 
 
 class Checkpoint(TypedDict):
+    format_version: int
     identity: RunIdentity
     revision: tuple[str, bool]
-    device: str
-    torch_version: str
-    torchvision_version: str
     history: list[dict[str, Any]]
     model: dict[str, torch.Tensor]
     best_model: dict[str, torch.Tensor]
@@ -166,10 +240,17 @@ def train(config: CracksConfig) -> TrainResult:
     validation loss over both phases is restored and saved; phase 2 stops after ``patience``
     epochs without improvement.
     """
+    paths = run_paths(config)
+    paths.root.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(paths.root / ".cracks-training.lock"), timeout=0):
+        return _train(config, paths)
+
+
+def _train(config: CracksConfig, paths: RunPaths) -> TrainResult:
     started = time.perf_counter()
     git_sha, git_dirty = git_revision()  # the code that trains, not the HEAD at the end
+    source_fingerprint = _source_fingerprint()
     device = configure_runtime(config)
-    paths = run_paths(config)
     paths.model_dir.mkdir(parents=True, exist_ok=True)
     manifest = ensure_splits(config)
     data_dir = project_path(config.data_dir)
@@ -177,6 +258,40 @@ def train(config: CracksConfig) -> TrainResult:
         manifest[manifest["split"] == "train"], config.train_fraction, config.seed
     )
     val_frame = manifest[manifest["split"] == "val"]
+    checkpoint_path = paths.root / "training_checkpoint.pt"
+    run_identity: RunIdentity = {
+        "config": config.model_dump(mode="json"),
+        "data_checksum": data_checksum(manifest),
+        "split_checksum": split_checksum(manifest),
+        "ordered_samples_checksum": ordered_samples_checksum(train_frame, val_frame),
+        "source_fingerprint": source_fingerprint,
+        "accelerator": _accelerator(device),
+    }
+    checkpoint: Checkpoint | None = None
+    if checkpoint_path.exists():
+        if not config.resumable:
+            raise ValueError(
+                f"Existing training checkpoint requires resumable mode: {checkpoint_path}"
+            )
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        if (
+            not isinstance(checkpoint, dict)
+            or checkpoint.get("format_version") != CHECKPOINT_FORMAT_VERSION
+        ):
+            raise ValueError(f"Unsupported training checkpoint format: {checkpoint_path}")
+        saved_identity = checkpoint.get("identity")
+        if not isinstance(saved_identity, dict):
+            raise ValueError(f"Missing training checkpoint identity: {checkpoint_path}")
+        mismatches = [
+            field for field in run_identity if saved_identity.get(field) != run_identity.get(field)
+        ]
+        if mismatches:
+            fields = ", ".join(mismatches)
+            raise ValueError(
+                f"Training checkpoint does not match this run ({fields}): {checkpoint_path}"
+            )
+        logger.info("Resuming %s after epoch %d", checkpoint_path, len(checkpoint["history"]))
+
     train_frame[["path", "label"]].to_csv(
         paths.root / "train_subset.csv", index=False, lineterminator="\n"
     )
@@ -196,24 +311,6 @@ def train(config: CracksConfig) -> TrainResult:
         num_workers=config.num_workers,
         seed=config.seed,
     )
-
-    checkpoint_path = paths.root / "training_checkpoint.pt"
-    run_identity: RunIdentity = {
-        "config": config.model_dump(mode="json"),
-        "data_checksum": data_checksum(manifest),
-        "split_checksum": split_checksum(manifest),
-    }
-    checkpoint: Checkpoint | None = None
-    if config.resumable and checkpoint_path.exists():
-        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        if (
-            checkpoint["identity"] != run_identity
-            or checkpoint["device"] != str(device)
-            or checkpoint["torch_version"] != torch.__version__
-            or checkpoint["torchvision_version"] != torchvision.__version__
-        ):
-            raise ValueError(f"Training checkpoint does not match this run: {checkpoint_path}")
-        logger.info("Resuming %s after epoch %d", checkpoint_path, len(checkpoint["history"]))
 
     model = build_model(config.architecture, config.pretrained and checkpoint is None).to(device)
     history: list[EpochLog] = []
@@ -252,7 +349,7 @@ def train(config: CracksConfig) -> TrainResult:
             epoch += 1
             epoch_start = time.perf_counter()
             if config.resumable:
-                # Recreate workers from the epoch seed so augmentation and shuffle resume exactly.
+                # Recreate workers to replay the epoch's shuffle and augmentation seeds.
                 epoch_seed = config.seed + epoch
                 torch.manual_seed(epoch_seed)
                 train_loader = make_loader(
@@ -303,11 +400,9 @@ def train(config: CracksConfig) -> TrainResult:
                 _save_checkpoint(
                     checkpoint_path,
                     Checkpoint(
+                        format_version=CHECKPOINT_FORMAT_VERSION,
                         identity=run_identity,
                         revision=(git_sha, git_dirty),
-                        device=str(device),
-                        torch_version=str(torch.__version__),
-                        torchvision_version=str(torchvision.__version__),
                         history=[asdict(row) for row in history],
                         model=model.state_dict(),
                         best_model=best_state,
@@ -345,6 +440,9 @@ def train(config: CracksConfig) -> TrainResult:
     created = datetime.now(UTC)
     training: dict[str, Any] = asdict(result) | {
         "parameters": count_parameters(model),
+        "accelerator": run_identity["accelerator"],
+        "source_fingerprint": run_identity["source_fingerprint"],
+        "ordered_samples_checksum": run_identity["ordered_samples_checksum"],
         "history": [asdict(row) for row in history],
     }
     metadata = ModelMetadata(

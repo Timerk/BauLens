@@ -512,3 +512,13 @@ def split_checksum(manifest: pd.DataFrame) -> str:
     for path, split in sorted(zip(manifest["path"], manifest["split"], strict=True)):
         digest.update(f"{path}\t{split}\n".encode())
     return digest.hexdigest()
+
+
+def ordered_samples_checksum(train: pd.DataFrame, val: pd.DataFrame) -> str:
+    """SHA-256 of the ordered path and label pairs supplied to the two loaders."""
+    digest = hashlib.sha256()
+    for split, frame in (("train", train), ("val", val)):
+        digest.update(f"{split}\n".encode())
+        for path, label in zip(frame["path"], frame["label"], strict=True):
+            digest.update(json.dumps([path, int(label)]).encode() + b"\n")
+    return digest.hexdigest()

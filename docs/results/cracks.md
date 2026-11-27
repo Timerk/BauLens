@@ -17,8 +17,8 @@ matching M3. The full config now sets six CPU threads for the benchmark and uses
 All three desktop runs have the same data checksum
 `8e21abdf960107a79add158f07e93b6c24b8de77a06d97ae57bd11d66a84092a` and split checksum
 `6d069c45af6140d0cb2f5bcc199bd5e6ccad0f089b6b5d017fad50801299735a`. The split uses the M3 recipe and
-reproduces its class counts and duplicate report. The original laptop model's checksum was
-unavailable here for a direct comparison.
+reproduces its class counts and duplicate report. The M3 laptop model metadata records both
+identical checksums, confirming that the split reproduced exactly across machines.
 
 | Metric | M3 laptop ResNet18 | Full ResNet18 | EfficientNet-B0 |
 | --- | --- | --- | --- |
@@ -32,19 +32,19 @@ unavailable here for a direct comparison.
 | Contrast 0.3x F1 / recall | 0.9136 / 0.841 | 0.8256 / 0.703 | 0.9627 / 0.928 |
 | Brightness 1.5x recall | 0.969 | 0.996 | 1.000 |
 | ONNX max abs. logit / probability error | 3.8e-5 / 1.2e-7 | 2.29e-5 / 1.19e-7 | 8.96e-5 / 9.54e-7 |
-| Training wall time | 46 min | 8 min 53 s | 14 min 41 s |
+| Recorded training time | 46 min | 8 min 53 s | 14 min 41 s |
 | Epochs run / restored | 9 / 7 | 10 / 7 | 12 / 9 |
 | Training hardware | Ryzen 7 5700U CPU (shared load) | Radeon RX 6800, Ryzen 7 9800X3D | Radeon RX 6800, Ryzen 7 9800X3D |
-| CPU batch 1 median, ORT / PyTorch | 6.3 / 20.0 ms | 4.10 / 5.25 ms | 1.89 / 7.45 ms |
-| CPU batch 32 median, ORT / PyTorch | 174 / 351 ms | 126.78 / 197.15 ms | 78.78 / 162.78 ms |
+| CPU batch 1 median, ORT / PyTorch (laptop for M3) | 6.3 / 20.0 ms | 4.10 / 5.25 ms | 1.89 / 7.45 ms |
+| CPU batch 32 median, ORT / PyTorch (laptop for M3) | 174 / 351 ms | 126.78 / 197.15 ms | 78.78 / 162.78 ms |
 
 The ONNX graphs passed the checker and agreed with PyTorch on all 512 parity labels. The
 EfficientNet-B0 graph is 15.9 MiB, compared with 42.7 MiB for both ResNet18 graphs.
-EfficientNet-B0 resumed from epoch 3 after a native HIP abort. Its recorded training time includes
-the completed work in both processes and excludes the unfinished part of the interrupted epoch
-and time between processes. See [GPU setup](../gpu.md).
+EfficientNet-B0 resumed from epoch 3 after a native HIP abort. Its 14 min 41 s is the recorded
+training time across both GPU processes, excluding work lost after the last checkpoint and
+downtime between processes. See [GPU setup](../gpu.md).
 
-### Robustness and release choice
+### Exploratory robustness comparison
 
 The clean test F1 scores are near the ceiling and their group intervals overlap. Full ResNet18
 made six errors, the same count as the laptop model. At strong low contrast it missed 297 of 1,000
@@ -53,13 +53,13 @@ quality 10 relative to its clean probe. Under 1.5x brightness, full ResNet18 rec
 compared with 0.969 for M3, and EfficientNet-B0 had zero misses. These comparisons use each
 model's fixed validation threshold.
 
-**Recommend EfficientNet-B0 as the published default for this patch benchmark.** Its advantage is
-higher recall under the tested low-contrast and overexposure conditions and a smaller ONNX
-file. The desktop ORT batch-one median is 1.89 ms, compared with 1.52 ms for the
-128 px replica and 4.10 ms for full ResNet18. The 128 px recipe remains the faster
-CPU option. EfficientNet-B0's validation F1 plateau is 0.600 to 0.605. Removing two influential
-validation patches one at a time changes the threshold to 0.551 or 0.764. The synthetic
-perturbations and shared source photos limit what this benchmark says about field use.
+**The M3 ResNet18 at 128 px remains the published default.** The full-resolution runs are
+exploratory comparisons, each evaluated once on the held-out test split. Their clean scores and
+test-set corruption results did not drive a default change. A confirmatory model comparison
+requires a selection rule fixed in advance and applied only to validation data, followed by a
+fresh holdout. This dataset provides no fresh holdout, and its patches share source photos.
+EfficientNet-B0's validation F1 plateau is 0.600 to 0.605. Removing two influential validation
+patches one at a time changes the threshold to 0.551 or 0.764.
 
 ![EfficientNet-B0 precision and recall on the corruption probe](../figures/cracks/efficientnet_robustness.png)
 
@@ -77,17 +77,17 @@ Windows 11, AMD Ryzen 7 9800X3D, 8 cores / 16 threads, 32 GB RAM. Timing used Py
 iterations on preprocessed tensors. System CPU use in the second before each run was
 2.5% (128 px), 1.1% (full ResNet18) and 1.4% (EfficientNet-B0).
 The first EfficientNet-B0 benchmark started at 10.6% system CPU. The table uses the repeat.
-The desktop 128 px replica trained on ROCm with the M3 settings in 1 min 58 s
+The fresh desktop 128 px refit trained on ROCm with the M3 settings in 1 min 58 s
 (9 epochs, restored epoch 7). Its threshold was 0.975, test F1 was 0.9990
 [0.9982, 0.9997], and contrast 0.3x recall was 0.809.
 The original M3 benchmark below was measured under shared load on the laptop.
 
 | Desktop model | Backend | Batch | Median | p95 |
 | --- | --- | ---: | ---: | ---: |
-| M3-style ResNet18 | PyTorch | 1 | 4.97 ms | 6.00 ms |
-| M3-style ResNet18 | PyTorch | 32 | 65.17 ms | 69.01 ms |
-| M3-style ResNet18 | ORT | 1 | 1.52 ms | 1.56 ms |
-| M3-style ResNet18 | ORT | 32 | 43.51 ms | 45.33 ms |
+| Fresh 128 px ResNet18 refit | PyTorch | 1 | 4.97 ms | 6.00 ms |
+| Fresh 128 px ResNet18 refit | PyTorch | 32 | 65.17 ms | 69.01 ms |
+| Fresh 128 px ResNet18 refit | ORT | 1 | 1.52 ms | 1.56 ms |
+| Fresh 128 px ResNet18 refit | ORT | 32 | 43.51 ms | 45.33 ms |
 | Full ResNet18 | PyTorch | 1 | 5.25 ms | 8.10 ms |
 | Full ResNet18 | PyTorch | 32 | 197.15 ms | 208.36 ms |
 | Full ResNet18 | ORT | 1 | 4.10 ms | 4.24 ms |
@@ -359,8 +359,9 @@ against `onnx.sha256`. The ONNX Runtime session and the PyTorch model are built 
 those verified bytes. A crash before the pointer switch leaves the previous generation current.
 Tests cover a failed pointer write, a failed parity check, and swapped weights or graphs. All
 commands also refuse to run when the current data or split checksums differ from those recorded
-at training. M3 training writes best-so-far weights to `checkpoint_in_progress.pt`. Resumable runs save
-training state in `training_checkpoint.pt`. Inference reads only published generations.
+at training. M3 training writes best-so-far weights to `checkpoint_in_progress.pt`. Resumable
+runs save training state in `training_checkpoint.pt` under a per-run training lock. Inference
+reads published generations.
 
 | Check | Result |
 | --- | --- |

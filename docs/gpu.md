@@ -1,6 +1,6 @@
 # Training with the Radeon RX 6800 on Windows
 
-Tested on DESKTOP-JRMR9BE with Windows 11 Home build 26200, an AMD Ryzen 7 9800X3D
+Tested on Windows 11 Home build 26200, an AMD Ryzen 7 9800X3D
 (8 cores, 16 threads), 32 GB installed RAM, and a Radeon RX 6800 (gfx1030, 16 GB VRAM,
 driver 32.0.21045.16010).
 
@@ -32,6 +32,12 @@ $env:HIP_VISIBLE_DEVICES = '0'  # RX 6800 on this machine. Check the listing fir
 ```
 
 ## Verify training
+
+Create the probe directory from the checkout.
+
+```powershell
+New-Item -ItemType Directory -Force artifacts | Out-Null
+```
 
 Save the probe below to `artifacts/rocm_probe.py` and run
 `& $rocmPython -u artifacts/rocm_probe.py`. The tensor multiplication returned
@@ -78,10 +84,16 @@ for architecture in ("resnet18", "efficientnet_b0"):
 
 Use `configs/cracks_full.yaml` for ResNet18 and `configs/cracks_efficientnet.yaml`
 for EfficientNet-B0. The full configs save a checkpoint at each completed epoch.
-Run the same train command after an interruption to resume. It uses the same shuffle
-and augmentation seeds per epoch on the same device and software versions. Changing
-the config, data, or split requires a fresh checkpoint directory. Checkpoints and model
-bundles are under the configured `artifacts_dir`.
+Run the same train command after an interruption to resume. A per-run lock is held through
+model publication and checkpoint cleanup. Resume checks the checkpoint format, the training
+source fingerprint, the config, the data and split hashes, the ordered train and validation
+path/label pairs, and the effective accelerator and software versions. The published metadata
+records the accelerator for new runs. Checkpoints from the earlier unversioned format require
+a fresh run. Use a separate `artifacts_dir` for a different run.
+
+Epoch reseeding replays shuffle, augmentation and dropout random streams. Some GPU kernels
+can still be nondeterministic because the GPU config uses PyTorch's warning-only mode for
+deterministic algorithms.
 
 ```powershell
 $config = 'configs/cracks_full.yaml'
