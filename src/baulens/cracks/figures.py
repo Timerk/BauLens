@@ -191,7 +191,13 @@ def gallery(
 ) -> None:
     """Grid of (overlay) images; an empty selection renders a short note instead."""
     rows = max(1, -(-len(images) // columns))
-    figure, axes = plt.subplots(rows, columns, figsize=(1.9 * columns, 2.15 * rows), squeeze=False)
+    figure, axes = plt.subplots(
+        rows,
+        columns,
+        figsize=(1.9 * columns, 2.15 * rows + 0.35),
+        squeeze=False,
+        layout="constrained",
+    )
     for ax in axes.ravel():
         ax.axis("off")
     for ax, image, caption in zip(axes.ravel(), images, captions, strict=False):

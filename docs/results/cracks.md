@@ -1,8 +1,109 @@
 # Crack detection: results
 
 Binary classification of 227 × 227 px concrete surface patches (crack / no crack) on the
-[Özgenel (2019)](https://data.mendeley.com/datasets/5y9wdsg2zt/2) dataset (CC BY 4.0) with
-ResNet18 transfer learning on a laptop CPU. Model card: [docs/model_cards/cracks.md](../model_cards/cracks.md).
+[Özgenel (2019)](https://data.mendeley.com/datasets/5y9wdsg2zt/2) dataset (CC BY 4.0).
+See the [model card](../model_cards/cracks.md).
+
+## Desktop comparison
+
+The M3 column preserves the original laptop run from M3. The two full-resolution models used
+the same 28,000 training patches, seed 42, 224 px input, ImageNet initialisation, batch size 64,
+two head-only epochs and up to 15 fine-tuning epochs with the last two backbone blocks trainable.
+Early stopping restored the lowest validation BCE loss. The evaluator chose the F1 threshold on
+6,000 validation patches before scoring the 6,000 held-out test patches. Group bootstrap CIs use
+2,000 resamples and a fixed threshold. The corruption probe uses a stratified 2,000-patch subset,
+matching M3. The full config now sets six CPU threads for the benchmark and uses epoch checkpoints.
+
+All three desktop runs have the same data checksum
+`8e21abdf960107a79add158f07e93b6c24b8de77a06d97ae57bd11d66a84092a` and split checksum
+`6d069c45af6140d0cb2f5bcc199bd5e6ccad0f089b6b5d017fad50801299735a`. The split uses the M3 recipe and
+reproduces its class counts and duplicate report. The M3 laptop model metadata records both
+identical checksums, confirming that the split reproduced exactly across machines.
+
+| Metric | M3 laptop ResNet18 | Full ResNet18 | EfficientNet-B0 |
+| --- | --- | --- | --- |
+| Train patches / input | 11,200 / 128 px | 28,000 / 224 px | 28,000 / 224 px |
+| Validation threshold | 0.954 | 0.909 | 0.600 |
+| Test F1 [95% group CI] | 0.9990 [0.9982, 0.9997] | 0.9990 [0.9979, 0.9998] | 0.9993 [0.9987, 0.9998] |
+| Test ROC-AUC | 0.999997 | 0.999996 | 0.999999 |
+| Test ECE | 0.0012 | 0.000874 | 0.000887 |
+| Test FP / FN | 2 / 4 | 3 / 3 | 3 / 1 |
+| Contrast 0.6x F1 / recall | 0.9945 / 0.989 | 0.9899 / 0.980 | 0.9995 / 0.999 |
+| Contrast 0.3x F1 / recall | 0.9136 / 0.841 | 0.8256 / 0.703 | 0.9627 / 0.928 |
+| Brightness 1.5x recall | 0.969 | 0.996 | 1.000 |
+| ONNX max abs. logit / probability error | 3.8e-5 / 1.2e-7 | 2.29e-5 / 1.19e-7 | 8.96e-5 / 9.54e-7 |
+| Recorded training time | 46 min | 8 min 53 s | 14 min 41 s |
+| Epochs run / restored | 9 / 7 | 10 / 7 | 12 / 9 |
+| Training hardware | Ryzen 7 5700U CPU (shared load) | Radeon RX 6800, Ryzen 7 9800X3D | Radeon RX 6800, Ryzen 7 9800X3D |
+| CPU batch 1 median, ORT / PyTorch (laptop for M3) | 6.3 / 20.0 ms | 4.10 / 5.25 ms | 1.89 / 7.45 ms |
+| CPU batch 32 median, ORT / PyTorch (laptop for M3) | 174 / 351 ms | 126.78 / 197.15 ms | 78.78 / 162.78 ms |
+
+The ONNX graphs passed the checker and agreed with PyTorch on all 512 parity labels. The
+EfficientNet-B0 graph is 15.9 MiB, compared with 42.7 MiB for both ResNet18 graphs.
+EfficientNet-B0 resumed from epoch 3 after a native HIP abort. Its 14 min 41 s is the recorded
+training time across both GPU processes, excluding work lost after the last checkpoint and
+downtime between processes. See [GPU setup](../gpu.md).
+
+### Exploratory robustness comparison
+
+The clean test F1 scores are near the ceiling and their group intervals overlap. Full ResNet18
+made six errors, the same count as the laptop model. At strong low contrast it missed 297 of 1,000
+cracks, compared with 159 for M3 and 72 for EfficientNet-B0. It also lost 0.0101 F1 at JPEG
+quality 10 relative to its clean probe. Under 1.5x brightness, full ResNet18 recall rose to 0.996
+compared with 0.969 for M3, and EfficientNet-B0 had zero misses. These comparisons use each
+model's fixed validation threshold.
+
+**The M3 ResNet18 at 128 px remains the published default.** The full-resolution runs are
+exploratory comparisons, each evaluated once on the held-out test split. Their clean scores and
+test-set corruption results did not drive a default change. A confirmatory model comparison
+requires a selection rule fixed in advance and applied only to validation data, followed by a
+fresh holdout. This dataset provides no fresh holdout, and its patches share source photos.
+EfficientNet-B0's validation F1 plateau is 0.600 to 0.605. Removing two influential validation
+patches one at a time changes the threshold to 0.551 or 0.764.
+
+![EfficientNet-B0 precision and recall on the corruption probe](../figures/cracks/efficientnet_robustness.png)
+
+![EfficientNet-B0 test errors with Grad-CAM overlays](../figures/cracks/efficientnet_error_gallery.png)
+
+The false positive `Negative/07903.jpg` and false negative `Positive/01360.jpg` recur in the
+M3 laptop run and both full-resolution runs. A visible hairline in the negative patch makes its
+label questionable. The false negative is a faint crack. The 7-by-7 Grad-CAM maps show coarse evidence
+regions.
+
+### Desktop CPU benchmark
+
+Windows 11, AMD Ryzen 7 9800X3D, 8 cores / 16 threads, 32 GB RAM. Timing used PyTorch
+2.15.0+cpu and ONNX Runtime 1.32.0 with six threads, 10 warm-up iterations and 100 timed
+iterations on preprocessed tensors. System CPU use in the second before each run was
+2.5% (128 px), 1.1% (full ResNet18) and 1.4% (EfficientNet-B0).
+The first EfficientNet-B0 benchmark started at 10.6% system CPU. The table uses the repeat.
+The fresh desktop 128 px refit trained on ROCm with the M3 settings in 1 min 58 s
+(9 epochs, restored epoch 7). Its threshold was 0.975, test F1 was 0.9990
+[0.9982, 0.9997], and contrast 0.3x recall was 0.809.
+The original M3 benchmark below was measured under shared load on the laptop.
+
+| Desktop model | Backend | Batch | Median | p95 |
+| --- | --- | ---: | ---: | ---: |
+| Fresh 128 px ResNet18 refit | PyTorch | 1 | 4.97 ms | 6.00 ms |
+| Fresh 128 px ResNet18 refit | PyTorch | 32 | 65.17 ms | 69.01 ms |
+| Fresh 128 px ResNet18 refit | ORT | 1 | 1.52 ms | 1.56 ms |
+| Fresh 128 px ResNet18 refit | ORT | 32 | 43.51 ms | 45.33 ms |
+| Full ResNet18 | PyTorch | 1 | 5.25 ms | 8.10 ms |
+| Full ResNet18 | PyTorch | 32 | 197.15 ms | 208.36 ms |
+| Full ResNet18 | ORT | 1 | 4.10 ms | 4.24 ms |
+| Full ResNet18 | ORT | 32 | 126.78 ms | 130.08 ms |
+| EfficientNet-B0 | PyTorch | 1 | 7.45 ms | 7.87 ms |
+| EfficientNet-B0 | PyTorch | 32 | 162.78 ms | 173.07 ms |
+| EfficientNet-B0 | ORT | 1 | 1.89 ms | 2.18 ms |
+| EfficientNet-B0 | ORT | 32 | 78.78 ms | 79.95 ms |
+
+For the desktop 128 px reproduction, copy `configs/cracks.yaml`, set
+`artifacts_dir: artifacts/cracks_m3_desktop` and `docs_figures_dir: null`, then run the same
+train, evaluate, export and benchmark commands as for the full configurations. The default
+CLI config still points to the 128 px recipe. The full configs write all figures under their
+run directories. The original M3 figures are kept with the original run below.
+
+## M3 laptop run
 
 **Summary.** On the held-out test split (6,000 images, duplicates grouped), the model makes 6
 errors: F1 0.9990 (95 % duplicate-group bootstrap CI 0.9982–0.9997; source-photo dependence
@@ -258,8 +359,9 @@ against `onnx.sha256`. The ONNX Runtime session and the PyTorch model are built 
 those verified bytes. A crash before the pointer switch leaves the previous generation current.
 Tests cover a failed pointer write, a failed parity check, and swapped weights or graphs. All
 commands also refuse to run when the current data or split checksums differ from those recorded
-at training. Training writes its best-so-far weights only to `checkpoint_in_progress.pt`, which
-is never read.
+at training. M3 training writes best-so-far weights to `checkpoint_in_progress.pt`. Resumable
+runs save training state in `training_checkpoint.pt` under a per-run training lock. Inference
+reads published generations.
 
 | Check | Result |
 | --- | --- |
@@ -297,15 +399,10 @@ covers the whole Python process, including the imported libraries.
   and no crack width, length or type.
 - Test images share source photos with training images (not detectable), and some near-duplicates
   below the r ≥ 0.85 cut-off remain. The test score is optimistic.
-- The CPU default uses 40 % of the training split at 128 px. `configs/cracks_full.yaml` (all
-  28,000 training images, 224 px, two fine-tuned stages, up to 15 epochs, `device: auto`, which
-  also covers ROCm) is prepared for a GPU machine but **not run**. With accuracy already at
-  0.999, the larger run would mostly matter for robustness and finer Grad-CAM maps.
 - Only one seed was trained. Variation between seeds is unmeasured, and with 6 test errors it
   would be dominated by individual images.
 - The threshold maximises F1. A screening deployment should set it to meet a recall target on
   representative data.
-- EfficientNet-B0 is implemented (`architecture: efficientnet_b0`) but was not trained here.
 - Provenance: `metadata.json` of this run records `git_sha` 93e814a with `git_dirty: true`,
   because the SHA was read at the end of training. That commit belongs to the branch history
   before the rebase onto `main`. Its `src/baulens/cracks`, data and seed code and

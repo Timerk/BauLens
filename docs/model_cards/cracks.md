@@ -1,5 +1,7 @@
 # Model card: BauLens crack classifier
 
+## Published and CLI default (M3)
+
 | | |
 | --- | --- |
 | Task | Binary classification of a concrete surface **image patch**: crack / no crack |
@@ -54,6 +56,41 @@ Over-exposure (× 1.5) lowers recall to 0.969. Precision stays at 1.000 except a
 calibration, the full corruption probe, the error gallery and the ONNX/CPU benchmark. Test performance is near the ceiling, as
 is usual for this dataset. **It measures in-distribution performance on one homogeneous,
 single-source lab-like dataset and says little about field performance.**
+
+## Exploratory desktop comparison
+
+| Metric | M3 laptop ResNet18 | Full ResNet18 | EfficientNet-B0 |
+| --- | --- | --- | --- |
+| Train patches / input | 11,200 / 128 px | 28,000 / 224 px | 28,000 / 224 px |
+| Validation threshold | 0.954 | 0.909 | 0.600 |
+| Test F1 [95% group CI] | 0.9990 [0.9982, 0.9997] | 0.9990 [0.9979, 0.9998] | 0.9993 [0.9987, 0.9998] |
+| Test ROC-AUC | 0.999997 | 0.999996 | 0.999999 |
+| Test ECE | 0.0012 | 0.000874 | 0.000887 |
+| Test FP / FN | 2 / 4 | 3 / 3 | 3 / 1 |
+| Contrast 0.6x F1 / recall | 0.9945 / 0.989 | 0.9899 / 0.980 | 0.9995 / 0.999 |
+| Contrast 0.3x F1 / recall | 0.9136 / 0.841 | 0.8256 / 0.703 | 0.9627 / 0.928 |
+| Brightness 1.5x recall | 0.969 | 0.996 | 1.000 |
+| ONNX max abs. logit / probability error | 3.8e-5 / 1.2e-7 | 2.29e-5 / 1.19e-7 | 8.96e-5 / 9.54e-7 |
+| Recorded training time | 46 min | 8 min 53 s | 14 min 41 s |
+| Epochs run / restored | 9 / 7 | 10 / 7 | 12 / 9 |
+| Training hardware | Ryzen 7 5700U CPU (shared load) | Radeon RX 6800, Ryzen 7 9800X3D | Radeon RX 6800, Ryzen 7 9800X3D |
+| CPU batch 1 median, ORT / PyTorch (laptop for M3) | 6.3 / 20.0 ms | 4.10 / 5.25 ms | 1.89 / 7.45 ms |
+| CPU batch 32 median, ORT / PyTorch (laptop for M3) | 174 / 351 ms | 126.78 / 197.15 ms | 78.78 / 162.78 ms |
+
+The full-resolution runs use the validation-chosen thresholds shown above. The desktop
+benchmark ran with six threads on a Ryzen 7 9800X3D (8 cores / 16 threads, 32 GB RAM),
+PyTorch 2.15.0+cpu and ONNX Runtime 1.32.0. The laptop figures record M3 under shared load.
+A fresh 128 px desktop refit of the M3 recipe ran at 1.52 ms ONNX at batch one. EfficientNet-B0's
+14 min 41 s records training across two GPU processes, excluding work lost after the last
+checkpoint and downtime. See the [results](../results/cracks.md) and [GPU guide](../gpu.md).
+
+**The published default remains M3 ResNet18 at 128 px.** Each full-resolution model was
+evaluated once on test as an exploratory comparison. The clean F1 intervals overlap. At a
+contrast factor of 0.3, EfficientNet-B0 detected 928 of 1,000 cracks, compared with 841 for M3
+and 703 for full ResNet18. Those test results did not drive a default change. A confirmatory
+claim requires a selection rule fixed before evaluation and applied only to validation data,
+followed by a fresh holdout that this dataset does not provide. Site data are needed to
+estimate field recall and choose a screening threshold.
 
 ## Limitations
 

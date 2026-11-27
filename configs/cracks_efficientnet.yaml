@@ -1,0 +1,50 @@
+# EfficientNet-B0 comparison with the same settings as configs/cracks_full.yaml.
+seed: 42
+data_dir: data/raw/cracks
+artifacts_dir: artifacts/cracks_efficientnet
+architecture: efficientnet_b0
+pretrained: true
+
+# Split and leakage handling
+val_fraction: 0.15
+test_fraction: 0.15
+near_duplicate_max_distance: 10
+near_duplicate_min_correlation: 0.85
+train_fraction: 1.0
+
+# Compute
+device: auto
+num_threads: 6
+num_workers: 6
+image_size: 224
+batch_size: 64
+eval_batch_size: 256
+
+# Schedule: head on a frozen backbone, then fine-tune the last stage at a lower rate
+head_epochs: 2
+epochs: 15
+finetune_blocks: 2
+lr_head: 0.001
+lr_finetune: 0.0002
+weight_decay: 0.0001
+patience: 3
+resumable: true
+
+# Augmentation
+crop_scale_min: 0.6
+color_jitter: 0.2
+
+# Evaluation
+threshold_strategy: f1
+bootstrap_resamples: 2000
+calibration_bins: 15
+robustness_max_images: 2000
+gallery_size: 8
+docs_figures_dir: null
+
+# Export and benchmark
+onnx_opset: 18
+parity_images: 512
+parity_tolerance: 0.0001
+benchmark_warmup: 10
+benchmark_iterations: 100

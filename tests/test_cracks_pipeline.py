@@ -9,9 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 import yaml
+from filelock import FileLock, Timeout
 from PIL import Image
 from typer.testing import CliRunner
 
@@ -304,3 +306,100 @@ def test_gradcam_is_safe_under_concurrent_requests(smoke_run: SmokeRun) -> None:
     for thread in threads:
         thread.join()
     assert failures == []
+
+
+def test_resumable_training_matches_uninterrupted_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from baulens.cracks import train as train_module
+    from baulens.cracks.splits import split_files
+
+    config = load_config(Path("configs/smoke/cracks.yaml"), CracksConfig).model_copy(
+        update={
+            "data_dir": make_synthetic_cracks(
+                tmp_path / "data", per_class=12, image_size=64, seed=42
+            ),
+            "artifacts_dir": tmp_path / "resumed",
+            "architecture": "efficientnet_b0",
+            "epochs": 2,
+            "resumable": True,
+        }
+    )
+    save = train_module._save_checkpoint
+    final_states: dict[Path, train_module.Checkpoint] = {}
+    interrupted = False
+
+    def capture_checkpoint(path: Path, state: train_module.Checkpoint) -> None:
+        nonlocal interrupted
+        save(path, state)
+        epoch = len(state["history"])
+        if epoch == 2 and path.parent == config.artifacts_dir and not interrupted:
+            interrupted = True
+            raise InterruptedError("simulated interruption")
+        if epoch == 3:
+            final_states[path.parent] = torch.load(path, map_location="cpu", weights_only=True)
+
+    monkeypatch.setattr(train_module, "_save_checkpoint", capture_checkpoint)
+    with pytest.raises(InterruptedError):
+        train_module.train(config)
+    checkpoint = config.artifacts_dir / "training_checkpoint.pt"
+    original = checkpoint.read_bytes()
+    state: train_module.Checkpoint = torch.load(io.BytesIO(original), weights_only=True)
+
+    with FileLock(str(config.artifacts_dir / ".cracks-training.lock")), pytest.raises(Timeout):
+        train_module.train(config)
+    with pytest.raises(ValueError, match=r"checkpoint does not match.*config"):
+        train_module.train(config.model_copy(update={"batch_size": 4}))
+
+    torch.save(state | {"format_version": -1}, checkpoint)
+    with pytest.raises(ValueError, match="Unsupported training checkpoint format"):
+        train_module.train(config)
+    identity = state["identity"]
+    for field, value in (
+        ("source_fingerprint", "different source"),
+        ("accelerator", identity["accelerator"] | {"device_name": "different accelerator"}),
+    ):
+        torch.save(state | {"identity": identity | {field: value}}, checkpoint)
+        with pytest.raises(ValueError, match=f"checkpoint does not match.*{field}"):
+            train_module.train(config)
+    checkpoint.write_bytes(original)
+
+    manifest = split_files(config).manifest
+    original_manifest = manifest.read_bytes()
+    frame = pd.read_csv(manifest, dtype={"phash": str})
+    for changed_frame in (frame.iloc[::-1], frame.assign(label=1 - frame["label"])):
+        changed_frame.to_csv(manifest, index=False)
+        with pytest.raises(
+            ValueError, match=r"checkpoint does not match.*ordered_samples_checksum"
+        ):
+            train_module.train(config)
+    manifest.write_bytes(original_manifest)
+
+    resumed = train_module.train(config)
+    control_config = config.model_copy(update={"artifacts_dir": tmp_path / "uninterrupted"})
+    uninterrupted = train_module.train(control_config)
+    assert not checkpoint.exists()
+    assert resumed.epochs_run == uninterrupted.epochs_run == 3
+    assert resumed.best_epoch == uninterrupted.best_epoch
+    assert resumed.best_val_loss == uninterrupted.best_val_loss
+    resumed_state = final_states[config.artifacts_dir]
+    control_state = final_states[control_config.artifacts_dir]
+    assert resumed_state["model"].keys() == control_state["model"].keys()
+    assert all(
+        torch.equal(tensor, control_state["model"][name])
+        for name, tensor in resumed_state["model"].items()
+    )
+    history_fields = ("phase", "epoch", "learning_rate", "train_loss", "val_loss")
+    assert [tuple(row[key] for key in history_fields) for row in resumed_state["history"]] == [
+        tuple(row[key] for key in history_fields) for row in control_state["history"]
+    ]
+
+    resumed_bundle = load_published(Path(resumed.model_dir))
+    control_bundle = load_published(Path(uninterrupted.model_dir))
+    assert resumed_bundle.metadata.training["accelerator"] == identity["accelerator"]
+    resumed_weights = torch.load(io.BytesIO(resumed_bundle.weights), weights_only=True)
+    control_weights = torch.load(io.BytesIO(control_bundle.weights), weights_only=True)
+    assert resumed_weights.keys() == control_weights.keys()
+    assert all(
+        torch.equal(tensor, control_weights[name]) for name, tensor in resumed_weights.items()
+    )

@@ -5,14 +5,20 @@ import io
 import json
 import logging
 import math
+import os
+import platform
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Any
+from hashlib import sha256
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Any, TypedDict
 
 import pandas as pd
 import torch
 import torchvision  # type: ignore[import-untyped]
+from filelock import FileLock
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -28,7 +34,7 @@ from baulens.cracks.data import (
     stratified_sample,
     train_transform,
 )
-from baulens.cracks.metadata import ModelMetadata, git_revision, publish_model, run_paths
+from baulens.cracks.metadata import ModelMetadata, RunPaths, git_revision, publish_model, run_paths
 from baulens.cracks.model import (
     build_model,
     configure_trainable,
@@ -37,11 +43,27 @@ from baulens.cracks.model import (
     set_train_mode,
     weights_name,
 )
-from baulens.cracks.splits import data_checksum, ensure_splits, split_checksum, split_settings
+from baulens.cracks.splits import (
+    data_checksum,
+    ensure_splits,
+    ordered_samples_checksum,
+    split_checksum,
+    split_settings,
+)
 from baulens.paths import project_path
 from baulens.seed import seed_everything
 
 logger = logging.getLogger(__name__)
+CHECKPOINT_FORMAT_VERSION = 1
+_TRAINING_SOURCES = (
+    "config.py",
+    "paths.py",
+    "seed.py",
+    "cracks/data.py",
+    "cracks/model.py",
+    "cracks/splits.py",
+    "cracks/train.py",
+)
 
 
 @dataclass(frozen=True)
@@ -55,6 +77,92 @@ class EpochLog:
     val_f1: float
     learning_rate: float
     seconds: float
+
+
+class Accelerator(TypedDict):
+    backend: str
+    device_name: str
+    device_index: int | None
+    device_uuid: str | None
+    visible_devices: dict[str, str]
+    runtime_version: str | None
+    torch_version: str
+    torchvision_version: str
+    threads: int
+
+
+def _accelerator(device: torch.device) -> Accelerator:
+    index = None
+    uuid = None
+    visible_devices: dict[str, str] = {}
+    name = platform.processor() or platform.machine()
+    backend, runtime_version = "cpu", None
+    if device.type == "cuda":
+        index = device.index if device.index is not None else torch.cuda.current_device()
+        properties = torch.cuda.get_device_properties(index)
+        name = properties.name
+        uuid = str(properties.uuid) if getattr(properties, "uuid", None) is not None else None
+        backend = "rocm" if torch.version.hip else "cuda"
+        runtime_version = torch.version.hip or torch.version.cuda
+        visible_devices = {
+            key: os.environ[key]
+            for key in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+            if key in os.environ
+        }
+    return Accelerator(
+        backend=backend,
+        device_name=name,
+        device_index=index,
+        device_uuid=uuid,
+        visible_devices=visible_devices,
+        runtime_version=runtime_version,
+        torch_version=str(torch.__version__),
+        torchvision_version=str(torchvision.__version__),
+        threads=torch.get_num_threads(),
+    )
+
+
+def _source_fingerprint() -> str:
+    """Hash the training sources with normalized line endings for checkout portability."""
+    root = Path(__file__).resolve().parents[1]
+    sources = {
+        name: sha256((root / name).read_text(encoding="utf-8").encode()).hexdigest()
+        for name in _TRAINING_SOURCES
+    }
+    return sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()
+
+
+class RunIdentity(TypedDict):
+    config: dict[str, Any]
+    data_checksum: str
+    split_checksum: str
+    ordered_samples_checksum: str
+    source_fingerprint: str
+    accelerator: Accelerator
+
+
+class Checkpoint(TypedDict):
+    format_version: int
+    identity: RunIdentity
+    revision: tuple[str, bool]
+    history: list[dict[str, Any]]
+    model: dict[str, torch.Tensor]
+    best_model: dict[str, torch.Tensor]
+    best_epoch: int
+    stale: int
+    optimizer: dict[str, Any]
+    scheduler: dict[str, Any]
+    elapsed: float
+
+
+def _save_checkpoint(path: Path, state: Checkpoint) -> None:
+    with NamedTemporaryFile(dir=path.parent, delete=False) as output:
+        staged = Path(output.name)
+    try:
+        torch.save(state, staged)
+        staged.replace(path)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -132,10 +240,17 @@ def train(config: CracksConfig) -> TrainResult:
     validation loss over both phases is restored and saved; phase 2 stops after ``patience``
     epochs without improvement.
     """
+    paths = run_paths(config)
+    paths.root.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(paths.root / ".cracks-training.lock"), timeout=0):
+        return _train(config, paths)
+
+
+def _train(config: CracksConfig, paths: RunPaths) -> TrainResult:
     started = time.perf_counter()
     git_sha, git_dirty = git_revision()  # the code that trains, not the HEAD at the end
+    source_fingerprint = _source_fingerprint()
     device = configure_runtime(config)
-    paths = run_paths(config)
     paths.model_dir.mkdir(parents=True, exist_ok=True)
     manifest = ensure_splits(config)
     data_dir = project_path(config.data_dir)
@@ -143,12 +258,47 @@ def train(config: CracksConfig) -> TrainResult:
         manifest[manifest["split"] == "train"], config.train_fraction, config.seed
     )
     val_frame = manifest[manifest["split"] == "val"]
+    checkpoint_path = paths.root / "training_checkpoint.pt"
+    run_identity: RunIdentity = {
+        "config": config.model_dump(mode="json"),
+        "data_checksum": data_checksum(manifest),
+        "split_checksum": split_checksum(manifest),
+        "ordered_samples_checksum": ordered_samples_checksum(train_frame, val_frame),
+        "source_fingerprint": source_fingerprint,
+        "accelerator": _accelerator(device),
+    }
+    checkpoint: Checkpoint | None = None
+    if checkpoint_path.exists():
+        if not config.resumable:
+            raise ValueError(
+                f"Existing training checkpoint requires resumable mode: {checkpoint_path}"
+            )
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        if (
+            not isinstance(checkpoint, dict)
+            or checkpoint.get("format_version") != CHECKPOINT_FORMAT_VERSION
+        ):
+            raise ValueError(f"Unsupported training checkpoint format: {checkpoint_path}")
+        saved_identity = checkpoint.get("identity")
+        if not isinstance(saved_identity, dict):
+            raise ValueError(f"Missing training checkpoint identity: {checkpoint_path}")
+        mismatches = [
+            field for field in run_identity if saved_identity.get(field) != run_identity.get(field)
+        ]
+        if mismatches:
+            fields = ", ".join(mismatches)
+            raise ValueError(
+                f"Training checkpoint does not match this run ({fields}): {checkpoint_path}"
+            )
+        logger.info("Resuming %s after epoch %d", checkpoint_path, len(checkpoint["history"]))
+
     train_frame[["path", "label"]].to_csv(
         paths.root / "train_subset.csv", index=False, lineterminator="\n"
     )
 
+    train_dataset = CrackImageDataset.from_frame(data_dir, train_frame, train_transform(config))
     train_loader = make_loader(
-        CrackImageDataset.from_frame(data_dir, train_frame, train_transform(config)),
+        train_dataset,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
@@ -162,26 +312,53 @@ def train(config: CracksConfig) -> TrainResult:
         seed=config.seed,
     )
 
-    model = build_model(config.architecture, config.pretrained).to(device)
+    model = build_model(config.architecture, config.pretrained and checkpoint is None).to(device)
     history: list[EpochLog] = []
-    best_state = copy.deepcopy(model.state_dict())
     best_loss, best_f1, best_epoch = math.inf, 0.0, 0
+    previous_elapsed = 0.0
+    best_state = copy.deepcopy(model.state_dict())
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint["model"])
+        best_state = checkpoint["best_model"]
+        history = [EpochLog(**row) for row in checkpoint["history"]]
+        best_epoch = checkpoint["best_epoch"]
+        best_loss, best_f1 = history[best_epoch - 1].val_loss, history[best_epoch - 1].val_f1
+        git_sha, git_dirty = checkpoint["revision"]
+        previous_elapsed = checkpoint["elapsed"]
     phases = [
         ("head", 0, config.head_epochs, config.lr_head),
         ("finetune", config.finetune_blocks, config.epochs, config.lr_finetune),
     ]
-    epoch = 0
+    epoch = len(history)
     for phase, blocks, epochs, learning_rate in phases:
-        if epochs == 0:
+        completed = sum(row.phase == phase for row in history)
+        if completed >= epochs:
             continue
+        continuing = checkpoint is not None and history[-1].phase == phase
+        stale = checkpoint["stale"] if checkpoint is not None and continuing else 0
+        if phase == "finetune" and stale >= config.patience:
+            break
         trainable = configure_trainable(model, config.architecture, blocks)
         optimizer, scheduler = _optimizer(
             model, learning_rate, config.weight_decay, epochs * len(train_loader)
         )
-        stale = 0
-        for _ in range(epochs):
+        if checkpoint is not None and continuing:
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            scheduler.load_state_dict(checkpoint["scheduler"])
+        for _ in range(completed, epochs):
             epoch += 1
             epoch_start = time.perf_counter()
+            if config.resumable:
+                # Recreate workers to replay the epoch's shuffle and augmentation seeds.
+                epoch_seed = config.seed + epoch
+                torch.manual_seed(epoch_seed)
+                train_loader = make_loader(
+                    train_dataset,
+                    batch_size=config.batch_size,
+                    shuffle=True,
+                    num_workers=config.num_workers,
+                    seed=epoch_seed,
+                )
             set_train_mode(model, trainable)
             train_loss, train_acc, _ = run_epoch(model, train_loader, device, optimizer, scheduler)
             model.eval()
@@ -213,18 +390,36 @@ def train(config: CracksConfig) -> TrainResult:
                 best_state = copy.deepcopy(model.state_dict())
                 # Best-so-far weights for inspection after an interruption. This file is
                 # never published: only the complete artifact below becomes a generation.
-                torch.save(
-                    {k: v.cpu() for k, v in best_state.items()}, paths.checkpoint_in_progress
-                )
+                if not config.resumable:
+                    torch.save(
+                        {k: v.cpu() for k, v in best_state.items()}, paths.checkpoint_in_progress
+                    )
             else:
                 stale += 1
-                if phase == "finetune" and stale >= config.patience:
-                    break
+            if config.resumable:
+                _save_checkpoint(
+                    checkpoint_path,
+                    Checkpoint(
+                        format_version=CHECKPOINT_FORMAT_VERSION,
+                        identity=run_identity,
+                        revision=(git_sha, git_dirty),
+                        history=[asdict(row) for row in history],
+                        model=model.state_dict(),
+                        best_model=best_state,
+                        best_epoch=best_epoch,
+                        stale=stale,
+                        optimizer=optimizer.state_dict(),
+                        scheduler=scheduler.state_dict(),
+                        elapsed=previous_elapsed + time.perf_counter() - started,
+                    ),
+                )
+            if phase == "finetune" and stale >= config.patience:
+                break
 
     model.load_state_dict(best_state)
     weights = io.BytesIO()
     torch.save({k: v.cpu() for k, v in model.state_dict().items()}, weights)
-    wall_clock = time.perf_counter() - started
+    wall_clock = previous_elapsed + time.perf_counter() - started
 
     frame = pd.DataFrame([asdict(row) for row in history])
     frame.to_csv(paths.root / "history.csv", index=False, lineterminator="\n")
@@ -245,6 +440,9 @@ def train(config: CracksConfig) -> TrainResult:
     created = datetime.now(UTC)
     training: dict[str, Any] = asdict(result) | {
         "parameters": count_parameters(model),
+        "accelerator": run_identity["accelerator"],
+        "source_fingerprint": run_identity["source_fingerprint"],
+        "ordered_samples_checksum": run_identity["ordered_samples_checksum"],
         "history": [asdict(row) for row in history],
     }
     metadata = ModelMetadata(
@@ -255,8 +453,8 @@ def train(config: CracksConfig) -> TrainResult:
         normalization_mean=IMAGENET_MEAN,
         normalization_std=IMAGENET_STD,
         pretrained_weights=weights_name(config.architecture, config.pretrained),
-        data_checksum=data_checksum(manifest),
-        split_checksum=split_checksum(manifest),
+        data_checksum=run_identity["data_checksum"],
+        split_checksum=run_identity["split_checksum"],
         split_settings=split_settings(config),
         git_sha=git_sha,
         git_dirty=git_dirty,
@@ -272,4 +470,6 @@ def train(config: CracksConfig) -> TrainResult:
     (paths.root / "train_result.json").write_text(
         json.dumps(asdict(result), indent=2), encoding="utf-8"
     )
+    if config.resumable:
+        checkpoint_path.unlink(missing_ok=True)
     return result
