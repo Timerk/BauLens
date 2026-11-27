@@ -19,7 +19,8 @@ _KG = "kg/m³"
 
 
 class _Frozen(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # Non-finite floats (inf, nan) are not measurements and cannot be rendered in a report.
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
 
 class ConcreteMix(_Frozen):

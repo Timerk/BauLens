@@ -33,7 +33,7 @@ CPU PyTorch wheels have no musl (Alpine) builds, so `uv sync --locked` fails the
 | `make data` | `uv run baulens data download all` |
 | `make strength` | `uv run baulens strength train`, `uv run baulens strength evaluate` |
 | `make cracks` | `uv run baulens cracks train`, `uv run baulens cracks evaluate`, `uv run baulens cracks export`, `uv run baulens cracks benchmark` |
-| `make report` | `uv run baulens report generate`, `uv run baulens report compare` |
+| `make report` | `uv run baulens report compare` (needs Ollama; see [report results](docs/results/report.md)) |
 
 Pipeline code lives in `src/baulens/`, the dashboard placeholder is in `apps/dashboard/`, and
 YAML settings live in `configs/` and `configs/smoke/`. See [CONTRIBUTING.md](CONTRIBUTING.md)

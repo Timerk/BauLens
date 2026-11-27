@@ -51,16 +51,3 @@ def test_data_download_reports_a_clear_error(monkeypatch: pytest.MonkeyPatch) ->
 
     assert result.exit_code == 1
     assert "Dataset error: SHA-256 mismatch for cracks" in result.stderr
-
-
-@pytest.mark.parametrize(
-    ("group", "command", "milestone"),
-    [
-        ("report", "generate", 4),
-        ("report", "compare", 4),
-    ],
-)
-def test_pipeline_stub_reports_its_milestone(group: str, command: str, milestone: int) -> None:
-    result = runner.invoke(app, [group, command])
-    assert result.exit_code == 1
-    assert f"not implemented yet (milestone {milestone})" in result.stderr

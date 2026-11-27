@@ -3,5 +3,22 @@ artifacts_dir: artifacts/report
 models:
   - qwen2.5:3b
   - llama3.2:3b
+  - gemma3:4b
 temperature: 0.0
 max_tokens: 1024
+num_ctx: 4096
+generation_mode: narrative
+compare_modes:
+  - free
+  - narrative
+prompt_template: report_v2
+narrative_prompt_template: report_narrative_v1
+default_model: gemma3:4b
+max_schema_retries: 1
+max_correction_retries: 1
+request_timeout_s: 600
+keep_alive: 10m
+cases_path: data/report_cases/cases.jsonl
+replay_dir: data/report_replays
+results_doc: docs/results/report.md
+figures_dir: docs/figures/report

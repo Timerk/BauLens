@@ -1,0 +1,51 @@
+# Hand-labelled sentences for case PB-022 (both results; facts in docs/results/report.md).
+# `correct: true` means a careful human reviewer would accept the sentence; the checker
+# should find no violation. `correct: false` means it states a wrong or unsupported number.
+# Flagged correct sentences are false positives, unflagged wrong ones are false negatives.
+# Includes the elliptical and other fail-closed phrasings observed in the comparison runs.
+case_id: PB-022
+sentences:
+  # free text, correct
+  - {mode: free, correct: true, text: "Die prognostizierte Druckfestigkeit beträgt 37,9 MPa."}
+  - {mode: free, correct: true, text: "Das Prognoseintervall reicht von 30,8 MPa bis 44,9 MPa."}
+  - {mode: free, correct: true, text: "Die nominelle Überdeckung des Prognoseintervalls beträgt 90 %."}
+  - {mode: free, correct: true, text: "Die Risswahrscheinlichkeit von 96,6 % liegt über der Entscheidungsschwelle von 50 %."}
+  - {mode: free, correct: true, text: "Das Betonalter bei der Prüfung beträgt 28 Tage."}
+  - {mode: free, correct: true, text: "Die Rezeptur enthält 401,1 kg/m³ Zement und 191,2 kg/m³ Wasser."}
+  - {mode: free, correct: true, text: "Der Beitrag des Zements beträgt +6,8 MPa."}
+  - {mode: free, correct: true, text: "Das Bild wurde am 25.06.2026 um 08:20 Uhr aufgenommen."}
+  - {mode: free, correct: true, note: "elliptical contribution (observed, gemma3 PB-009)", text: "Der Beitrag des Zements beträgt +6,8 MPa, der des w/z-Werts +1,5 MPa."}
+  - {mode: free, correct: true, note: "'jeweils … bzw.' (observed, llama3.2 PB-004)", text: "Zement und w/z-Wert tragen jeweils +6,8 MPa bzw. +1,5 MPa bei."}
+  - {mode: free, correct: true, note: "label list without verbs (observed, llama3.2 PB-005)", text: "37,9 MPa (30,8 MPa bis 44,9 MPa, 90 %)."}
+  - {mode: free, correct: true, note: "positive contribution without its plus sign", text: "Der Zement erhöht die Festigkeit um 6,8 MPa."}
+  - {mode: free, correct: true, note: "number word for the age", text: "Das Betonalter beträgt achtundzwanzig Tage."}
+  - {mode: free, correct: true, note: "verb 'achten' read as an ordinal", text: "Bei der Probenahme ist auf eine saubere Bohrkernentnahme zu achten."}
+  # free text, wrong
+  - {mode: free, correct: false, text: "Die prognostizierte Druckfestigkeit beträgt 44,9 MPa."}
+  - {mode: free, correct: false, text: "Das Prognoseintervall reicht von 44,9 MPa bis 30,8 MPa."}
+  - {mode: free, correct: false, text: "Die Risswahrscheinlichkeit beträgt 90 %."}
+  - {mode: free, correct: false, text: "Die Frist zur Behebung beträgt 28 Tage."}
+  - {mode: free, correct: false, text: "Der Beitrag des Betonalters beträgt +6,8 MPa."}
+  - {mode: free, correct: false, text: "Geprüft wurden Drei Bohrkerne."}
+  - {mode: free, correct: false, text: "Die Festigkeit entspricht C30/37."}
+  - {mode: free, correct: false, text: "Die Risswahrscheinlichkeit beträgt 96,6 %-Punkte."}
+  - {mode: free, correct: false, note: "negation (documented limit of free text)", text: "Die Druckfestigkeit beträgt nicht 37,9 MPa."}
+  # narrative, correct (no numbers, no findings)
+  - {mode: narrative, correct: true, text: "Die Prognose der Druckfestigkeit ist eine Modellschätzung und sollte durch eine Prüfung an Bohrkernen bestätigt werden."}
+  - {mode: narrative, correct: true, text: "Der Rissbefund beruht auf einem einzelnen Bildausschnitt und ersetzt keine Sichtprüfung vor Ort."}
+  - {mode: narrative, correct: true, text: "Eine sachkundige Person sollte das Bauteil handnah begutachten und die Befunde einordnen."}
+  - {mode: narrative, correct: true, text: "Die Befunde sind als Entwurf zu verstehen und vor einer Verwendung fachlich zu prüfen."}
+  - {mode: narrative, correct: true, text: "Die Modellschätzung kann eine normgerechte Druckfestigkeitsprüfung nicht ersetzen."}
+  - {mode: narrative, correct: true, note: "verb 'achten' read as an ordinal", text: "Bei der Probenahme ist auf saubere Bohrkerne zu achten."}
+  - {mode: narrative, correct: true, note: "'innerhalb' outside a domain statement", text: "Die Bewertung sollte innerhalb der üblichen Prüfabläufe erfolgen."}
+  # narrative, wrong (numbers or restated findings)
+  - {mode: narrative, correct: false, text: "Die Druckfestigkeit von 37,9 MPa ist plausibel."}
+  - {mode: narrative, correct: false, text: "Es wurde ein Riss erkannt, der saniert werden muss."}
+  - {mode: narrative, correct: false, text: "Die Risswahrscheinlichkeit liegt deutlich über der Schwelle."}
+  - {mode: narrative, correct: false, text: "Die Eingaben liegen innerhalb des Trainingsbereichs."}
+  - {mode: narrative, correct: false, text: "Die Druckfestigkeit ist ausreichend."}
+  - {mode: narrative, correct: false, text: "Ein zwölfprozentiger Zuschlag ist erforderlich."}
+  - {mode: narrative, correct: false, text: "Der Grenzwert ist ein Fünfzehntel."}
+  - {mode: narrative, correct: false, text: "Geprüft wurden Ⅻ Bohrkerne."}
+  - {mode: narrative, correct: false, text: "Die Druckfestigkeit beträgt {druckfestigkeit}."}
+  - {mode: narrative, correct: false, text: "Das Bauteil ist rissfrei."}

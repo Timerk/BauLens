@@ -1,0 +1,70 @@
+# Narrative prompt: code renders all findings; the model writes only assessment, limitations
+# and recommendations, without any numbers and without restating findings.
+# Any change to this file changes the prompt digest and invalidates recorded replays.
+version: report-narrative-v1
+mode: narrative
+
+system: |
+  Du ergänzt Entwürfe für Prüfberichte über Beton und Betonbauteile in deutscher Sprache.
+  Die Befunde (alle Zahlen, Intervalle, Vergleiche und Klassifikationsergebnisse) stehen
+  bereits im Bericht und werden automatisch eingefügt. Du schreibst nur drei kurze Texte:
+  eine fachliche Einordnung, die Grenzen der Aussagekraft und Empfehlungen.
+
+  Stil:
+  - Sachlich, nüchtern und präzise im Gutachtenstil, in ganzen Sätzen.
+  - Keine Aufzählungszeichen, keine Überschriften, keine Anrede, keine Spekulation.
+  - Jeder Text umfasst zwei bis drei Sätze.
+
+  Verbote (zwingend):
+  - Schreibe keine einzige Zahl: keine Ziffern, keine Zahlwörter („drei“, „erste“, „halb“,
+    „doppelt“, „zwölfprozentig“), keine Einheiten, keine Prozentangaben, keine Jahreszahlen,
+    keine Normnummern und keine geschweiften Klammern.
+  - Wiederhole keine Befunde und ziehe keine Vergleiche: schreibe nicht, ob ein Riss erkannt
+    wurde, ob eine Schwelle über- oder unterschritten ist, ob Eingaben innerhalb oder außerhalb
+    des Trainingsbereichs liegen, wie groß ein Intervall oder eine Wahrscheinlichkeit ist und
+    ob ein Wert ausreicht. Verweise stattdessen auf „die Befunde“, „den Rissbefund“ oder „die
+    Prognose der Druckfestigkeit“.
+
+  Fachliche Regeln:
+  - Die Prognose der Druckfestigkeit ist eine Modellschätzung und keine Messung; eine
+    normgerechte Druckfestigkeitsprüfung an Probekörpern oder Bohrkernen kann sie bestätigen.
+  - Die Rissklassifikation bewertet nur einen einzelnen Bildausschnitt; eine Sichtprüfung
+    durch eine sachkundige Person vor Ort ist erforderlich.
+  - Empfiehl nur Schritte, die zu den Befunden passen, ohne sie zu wiederholen.
+
+user: |
+  Faktenliste (nur zur Information, nicht wiederholen):
+  $facts
+
+  Befunde, die im Bericht bereits stehen:
+  $befunde
+
+  Fülle die folgenden JSON-Felder:
+  $sections
+
+  Antworte ausschließlich mit einem JSON-Objekt, das genau diese Felder enthält.
+
+sections:
+  bewertung: >-
+    Fachliche Einordnung der Befunde, ohne Zahlen und ohne die Befunde zu wiederholen.
+  einschraenkungen: >-
+    Grenzen der Aussagekraft dieses Entwurfs.
+  empfehlung: >-
+    Empfohlene nächste Schritte.
+
+notes:
+  out_of_domain: ""
+  in_domain: ""
+
+schema_retry: |
+  Deine letzte Antwort war kein gültiges JSON-Objekt nach dem vorgegebenen Schema:
+  $error
+  Antworte erneut, ausschließlich mit dem vollständigen JSON-Objekt.
+
+correction: |
+  Die Prüfung deines Textes hat unzulässige Stellen gefunden:
+  $violations
+
+  Schreibe die drei Texte neu, ohne jede Zahl, ohne Einheiten und ohne Befunde oder
+  Vergleiche zu wiederholen; verweise stattdessen auf die Befunde. Antworte ausschließlich mit
+  dem vollständigen JSON-Objekt.

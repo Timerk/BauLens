@@ -5,15 +5,33 @@ import logging
 from dataclasses import asdict
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Never
+from typing import Annotated
 
 import typer
+from pydantic import ValidationError
 from rich.console import Console
 
 from baulens.artifacts import ArtifactError
-from baulens.config import CracksConfig, StrengthConfig, load_config
+from baulens.config import (
+    CracksConfig,
+    GenerationMode,
+    ReportConfig,
+    Settings,
+    StrengthConfig,
+    load_config,
+)
 from baulens.data.download import DatasetError, DatasetName, download_dataset
 from baulens.paths import project_path
+from baulens.report.cases import CASES_SEED, generate_cases, load_cases, save_cases
+from baulens.report.clients import LLMClient, OllamaClient
+from baulens.report.compare import run_comparison
+from baulens.report.facts import build_facts
+from baulens.report.faithfulness import check_text
+from baulens.report.generate import generate_report, generate_template
+from baulens.report.metrics import metrics_table
+from baulens.report.replay import ReplayClient
+from baulens.report.schemas import NumberCheck, ReportResult
+from baulens.schemas import InspectionInput
 
 app = typer.Typer(help="Run the BauLens inspection pipelines.", no_args_is_help=True)
 data_app = typer.Typer(help="Fetch verified copies of the public datasets.", no_args_is_help=True)
@@ -53,11 +71,6 @@ def data_download(
             typer.echo(f"Dataset error: {error}", err=True)
             raise typer.Exit(code=1) from error
         typer.echo(f"{name}: ready at {path}")
-
-
-def _pending(milestone: int) -> Never:
-    typer.echo(f"not implemented yet (milestone {milestone})", err=True)
-    raise typer.Exit(code=1)
 
 
 @strength_app.command("train")
@@ -211,13 +224,210 @@ def cracks_benchmark(config: CracksConfigOption = DEFAULT_CRACKS_CONFIG) -> None
     _echo_json(asdict(result))
 
 
+class GenerationChoice(StrEnum):
+    NARRATIVE = "narrative"
+    FREE = "free"
+
+
+class CompareSource(StrEnum):
+    LIVE = "live"
+    REPLAY = "replay"
+
+
+class ReportMode(StrEnum):
+    LIVE = "live"
+    REPLAY = "replay"
+    TEMPLATE = "template"
+
+
+ReportConfigOption = Annotated[
+    Path, typer.Option("--config", help="Report settings (YAML).", dir_okay=False)
+]
+CaseOption = Annotated[
+    Path, typer.Option("--input", help="InspectionInput as JSON.", exists=True, dir_okay=False)
+]
+
+
+def _read_case(path: Path) -> InspectionInput:
+    try:
+        return InspectionInput.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValidationError) as error:
+        typer.echo(f"Invalid input {path}: {error}", err=True)
+        raise typer.Exit(code=2) from error
+
+
+def _say(console: Console, text: str) -> None:
+    console.print(text, markup=False, highlight=False, soft_wrap=True)
+
+
+def _print_checks(console: Console, checks: list[NumberCheck]) -> None:
+    for check in checks:
+        _say(console, f"{check.status:>13}  {check.section}: {check.text!r} - {check.reason}")
+
+
 @report_app.command("generate")
-def report_generate() -> None:
-    """Generate an inspection report draft."""
-    _pending(4)
+def report_generate(
+    input_path: CaseOption,
+    model: Annotated[
+        str | None, typer.Option(help="Model tag; default: default_model in config.")
+    ] = None,
+    mode: Annotated[
+        ReportMode | None, typer.Option(help="live, replay or template; default BAULENS_LLM_MODE.")
+    ] = None,
+    generation: Annotated[
+        GenerationChoice | None,
+        typer.Option(
+            help="narrative (findings by code, the delivery mode) or free (experimental); "
+            "default from config."
+        ),
+    ] = None,
+    config_path: ReportConfigOption = Path("configs/report.yaml"),
+    as_json: Annotated[bool, typer.Option("--json", help="Print the full ReportResult.")] = False,
+) -> None:
+    """Generate a German inspection report draft behind the faithfulness gate."""
+    config = load_config(config_path, ReportConfig)
+    settings = Settings()
+    case = _read_case(input_path)
+    selected = mode or ReportMode(settings.llm_mode)
+    model_name = model or config.default_model
+    chosen: GenerationMode = generation.value if generation else config.generation_mode
+    result: ReportResult
+    if selected is ReportMode.TEMPLATE:
+        result = generate_template(case, config=config)
+    elif selected is ReportMode.REPLAY:
+        replay = ReplayClient.from_directory(project_path(config.replay_dir), model_name)
+        result = generate_report(case, replay, config, mode=chosen)
+    else:
+        client = OllamaClient(
+            str(settings.ollama_host),
+            model_name,
+            timeout_s=config.request_timeout_s,
+            keep_alive=config.keep_alive,
+        )
+        try:
+            result = generate_report(case, client, config, mode=chosen)
+        finally:
+            client.close()
+    console = Console()
+    if as_json:
+        typer.echo(result.model_dump_json(indent=2))
+        return
+    if chosen == "free" and selected is not ReportMode.TEMPLATE:
+        _say(console, "EXPERIMENTELL: Freitext-Modus, Zahlenprüfung nach bestem Bemühen.")
+    _say(console, result.delivered.to_markdown())
+    _say(
+        console,
+        f"status: {result.status} | source: {result.source} | model: {result.model or '-'} | "
+        f"prompt: {result.prompt_version} | latency: {result.latency_s:.1f} s",
+    )
+    if result.note:
+        _say(console, f"note: {result.note}")
+    if result.faithfulness is not None and result.faithfulness.violations:
+        _say(console, "violations in the last model draft:")
+        _print_checks(console, result.faithfulness.violations)
+    if result.completeness is not None:
+        missing = ", ".join(result.completeness.missing) or "none"
+        _say(console, f"completeness: {result.completeness.score:.2f} (missing: {missing})")
+
+
+@report_app.command("check")
+def report_check(
+    input_path: CaseOption,
+    text_path: Annotated[
+        Path, typer.Option("--text", help="Report text to check.", exists=True, dir_okay=False)
+    ],
+    show_all: Annotated[bool, typer.Option("--all", help="Also list accepted numbers.")] = False,
+) -> None:
+    """Run the numeric faithfulness checker on a text; exit 1 if any number is unfaithful."""
+    case = _read_case(input_path)
+    result = check_text(text_path.read_text(encoding="utf-8"), build_facts(case))
+    console = Console()
+    _print_checks(console, result.checks if show_all else result.violations)
+    counts = ", ".join(f"{kind} {count}" for kind, count in result.violation_counts().items())
+    _say(
+        console,
+        f"{len(result.checks)} numbers checked, {len(result.violations)} violations ({counts})",
+    )
+    if not result.faithful:
+        raise typer.Exit(code=1)
 
 
 @report_app.command("compare")
-def report_compare() -> None:
-    """Compare local models for inspection report drafting."""
-    _pending(4)
+def report_compare(
+    config_path: ReportConfigOption = Path("configs/report.yaml"),
+    models: Annotated[
+        list[str] | None, typer.Option("--model", help="Restrict to these models (repeatable).")
+    ] = None,
+    limit: Annotated[int | None, typer.Option(min=1, help="Use only the first N cases.")] = None,
+    record_replays: Annotated[
+        bool, typer.Option("--replays/--no-replays", help="Rewrite data/report_replays/.")
+    ] = True,
+    update_docs: Annotated[
+        bool, typer.Option("--docs/--no-docs", help="Rewrite the table and figure in docs/.")
+    ] = True,
+    source: Annotated[
+        CompareSource,
+        typer.Option(help="live: query Ollama; replay: re-score the recorded replies offline."),
+    ] = CompareSource.LIVE,
+    modes: Annotated[
+        list[GenerationChoice] | None,
+        typer.Option("--mode", help="Generation modes to compare (repeatable); default config."),
+    ] = None,
+    resume: Annotated[
+        Path | None,
+        typer.Option(help="Earlier run directory; reuse its complete models.", file_okay=False),
+    ] = None,
+) -> None:
+    """Compare the configured local models on all evaluation cases."""
+    config = load_config(config_path, ReportConfig)
+    if modes:
+        config = config.model_copy(update={"compare_modes": [mode.value for mode in modes]})
+    if not update_docs:
+        config = config.model_copy(update={"results_doc": None, "figures_dir": None})
+    host = str(Settings().ollama_host)
+    cases = load_cases(project_path(config.cases_path))[:limit]
+    console = Console()
+    replay_dir = project_path(config.replay_dir)
+
+    def live(model: str) -> LLMClient:
+        return OllamaClient(
+            host, model, timeout_s=config.request_timeout_s, keep_alive=config.keep_alive
+        )
+
+    def replayed(model: str) -> LLMClient:
+        return ReplayClient.from_directory(replay_dir, model)
+
+    version: str | None = None
+    if source is CompareSource.LIVE:
+        probe = OllamaClient(host, config.models[0])
+        version = probe.version()
+        probe.close()
+        if version is None:
+            typer.echo(f"Ollama is not reachable at {host}", err=True)
+            raise typer.Exit(code=1)
+    run = run_comparison(
+        config,
+        cases,
+        models=models,
+        client_factory=live if source is CompareSource.LIVE else replayed,
+        ollama_version=version,
+        record_replays=record_replays and source is CompareSource.LIVE,
+        source=source.value,
+        resume_dir=project_path(resume) if resume is not None else None,
+        progress=lambda line: _say(console, line),
+    )
+    _say(console, metrics_table(run.metrics))
+    _say(console, f"results: {run.run_dir}")
+
+
+@report_app.command("make-cases")
+def report_make_cases(
+    output: Annotated[Path, typer.Option(help="Destination JSONL.")] = Path(
+        "data/report_cases/cases.jsonl"
+    ),
+    seed: Annotated[int, typer.Option(help="Generator seed.")] = CASES_SEED,
+) -> None:
+    """Regenerate the synthetic evaluation cases deterministically."""
+    cases = generate_cases(seed)
+    save_cases(project_path(output), cases)
+    typer.echo(f"wrote {len(cases)} cases to {output}")

@@ -37,5 +37,4 @@ cracks:
 	$(RUN) baulens cracks benchmark
 
 report:
-	$(RUN) baulens report generate
 	$(RUN) baulens report compare
