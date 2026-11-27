@@ -40,11 +40,12 @@ use and no agent loop.
   threshold of 0.5 renders as 49,99 % against 50 %). Each fact has a role (point estimate,
   lower and upper bound, coverage, crack probability, threshold, ingredient, age, …) and a
   slot name.
-- **Slot generation as the production default** (added after the review of PR #11). The model
-  writes prose with placeholders such as `{druckfestigkeit}`; code inserts the numbers. Any
-  digit, number word, date or time the model writes itself is a violation, and the rendered
-  text is checked again so that a placeholder in the wrong place ("Die Druckfestigkeit beträgt
-  {obere_grenze} MPa") or with the wrong unit is caught.
+- **Strict slot generation as the production default** (added after the reviews of PR #11).
+  The model writes prose with placeholders such as `{druckfestigkeit}`; code inserts the
+  complete quantity with sign and unit (`61,9 MPa`). Outside slots the draft may contain no
+  numeral of any kind; signs or units next to a slot, malformed or unknown slots, slots in a
+  clause about another quantity, another feature, a deadline or a negation are violations, and
+  the point estimate, interval and crack finding are mandatory for delivery.
 - **Free-text generation as the evaluated baseline.** The model writes numbers itself and the
   checker accepts a number only in exactly the rendered form, with the fact's unit right after
   it, and with its role named by the surrounding words; it fails closed on ambiguity.
@@ -61,16 +62,18 @@ use and no agent loop.
 - Replays make the public demo (#5) deterministic and free of model hosting, but any change to
   the prompt template, the fact rendering or the case inputs invalidates recorded replies;
   `baulens report compare` re-records them.
-- Why slots: checking free text is bounded by the parser's coverage. The review of PR #11
+- Why slots: checking free text is bounded by the parser's coverage. The reviews of PR #11
   found numbers that passed because they were bound to no quantity, rounded, written in
-  another locale or hidden by an identifier mask; each fix narrows the gap, but a parser can
-  never enumerate every way prose can state a number. Rendering the numbers in code makes the
-  number channel faithful by construction, and the checker is left to guard misuse (literal
-  numbers, wrong placeholder, wrong unit, missing role), a much smaller surface. The cost is a
-  stricter prompt that small models follow less reliably; the comparison reports both modes.
+  another locale, spelled in another script or hidden by an identifier mask; each fix narrows
+  the gap, but a parser can never enumerate every way prose can state a number. In slot mode
+  every digit, sign and unit the reader sees is rendered by code from the input. What is
+  enforced beyond that is a fixed set of placement rules (grammar, adjacency, zero numerals,
+  per-slot vocabularies, forbidden contexts, mandatory facts); the meaning of the surrounding
+  prose is not verified. The cost is a stricter prompt that small models follow less
+  reliably; the comparison reports both modes.
 - The faithfulness check is the safety property, not the model: a model that ignores the rules
   produces rejected drafts and template reports, never deliveries with detected violations.
-  The check verifies numbers only; qualitative claims stay the reviewer's job (see
+  The checks verify numbers and their placement only; qualitative claims stay the reviewer's job (see
   `docs/results/report.md`).
 - Moving to another server (llama.cpp server, vLLM on a GPU machine, a hosted API) means one
   new `LLMClient` implementation; prompt, checker, replays and metrics stay unchanged.
