@@ -12,7 +12,8 @@ compare_modes:
   - free
   - slots
 prompt_template: report_v2
-slot_prompt_template: report_slots_v1
+slot_prompt_template: report_slots_v2
+default_model: gemma3:4b
 max_schema_retries: 1
 max_correction_retries: 1
 request_timeout_s: 600

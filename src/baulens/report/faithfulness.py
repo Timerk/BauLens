@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from baulens.report.facts import MIX_LABELS, Fact, FactSheet
+from baulens.report.lexicon import CAPTURE, DEADLINE, sentence_around
 from baulens.report.numbers import (
     ALLOWED_REFERENCES,
     Extraction,
@@ -45,7 +46,7 @@ from baulens.report.schemas import (
     SectionName,
 )
 
-CHECKER_VERSION = "3"
+CHECKER_VERSION = "4"
 """Bumped whenever a rule changes; resumed runs must match it."""
 
 ROLE_KEYWORDS: tuple[tuple[str, str], ...] = (
@@ -66,6 +67,7 @@ ROLE_KEYWORDS: tuple[tuple[str, str], ...] = (
         r"druckfestigkeit\w*|prognosewert\w*|schätzwert\w*|punktschätz\w*|prognostiziert\w*"
         r"|geschätzt\w*|prognose\b",
     ),
+    ("age", r"\w*alter\w*"),
     ("ingredient:blast_furnace_slag", r"hüttensand\w*|schlacke\w*"),
     ("ingredient:fly_ash", r"flugasche\w*"),
     ("ingredient:superplasticizer", r"fließmittel\w*|fliessmittel\w*"),
@@ -84,8 +86,9 @@ _KEYWORD_PATTERNS = tuple(
     for role, pattern in ROLE_KEYWORDS
 )
 _PRIORITY = {role: index for index, (role, _) in enumerate(ROLE_KEYWORDS)}
-UNIT_ROLES = frozenset({"age", "pixels"})
-"""Roles that the unit alone determines: only one quantity per case is in days or pixels."""
+UNIT_ROLES = frozenset({"pixels"})
+"""Roles that the unit alone determines: the only pixel quantity is the image size. Days need
+the word "Alter", because a number of days can also be read as a deadline or a duration."""
 
 ROLE_NAMES: dict[str, str] = {
     "point": "Prognosewert der Druckfestigkeit",
@@ -135,6 +138,8 @@ def _relevant(role: str, unit: str | None) -> bool:
         return unit == "kg/m³"
     if role == "ratio":
         return unit is None
+    if role == "age":
+        return unit == "d"
     return False
 
 
@@ -169,8 +174,6 @@ def _fact_digits(fact: Fact) -> str:
 
 
 def _exact(token: NumberToken, fact: Fact) -> bool:
-    if token.kind == "word":
-        return fact.decimals == 0 and not fact.signed and fact.value == token.value
     return (
         not token.foreign and token.digits == _fact_digits(fact) and token.sign == _fact_sign(fact)
     )
@@ -263,12 +266,21 @@ def _check_number(token: NumberToken, sheet: FactSheet, section: str) -> NumberC
         return _number_check(token, "unbound", reason, section, [f.field for f in with_unit])
     roles, keyword = stated
     bound = [fact for fact in with_unit if fact.role in roles]
-    if bound:
-        reason = f"exakt aus {_shown(bound[0])} („{keyword.strip()}“)"
-        return _number_check(token, "ok", reason, section, [f.field for f in bound])
+    clause = f"{token.far} {token.before} {token.after}"
+    if bound and DEADLINE.search(clause):
+        reason = f"Wert von {_shown(bound[0])}, aber als Frist, Termin oder Dauer verwendet"
+        return _number_check(token, "misattributed", reason, section, [bound[0].field])
+    # A contribution or feature value must be stated with its own feature ("Zement").
+    named = [fact for fact in bound if not fact.terms or re.search(fact.terms, clause, re.I)]
+    if bound and not named:
+        reason = f"Wert von {_shown(bound[0])}, aber der Satzteil nennt eine andere Einflussgröße"
+        return _number_check(token, "misattributed", reason, section, [bound[0].field])
+    if named:
+        reason = f"exakt aus {_shown(named[0])} („{keyword.strip()}“)"
+        return _number_check(token, "ok", reason, section, [f.field for f in named])
     fact = with_unit[0]
-    named = " oder ".join(sorted(role_name(role) for role in roles))
-    reason = f"Wert von {_shown(fact)}, aber im Text als {named} bezeichnet („{keyword.strip()}“)"
+    called = " oder ".join(sorted(role_name(role) for role in roles))
+    reason = f"Wert von {_shown(fact)}, aber im Text als {called} bezeichnet („{keyword.strip()}“)"
     return _number_check(token, "misattributed", reason, section, [fact.field])
 
 
@@ -292,17 +304,22 @@ def _special_check(
     )
 
 
-def _check_special(token: SpecialToken, sheet: FactSheet, section: str) -> NumberCheck:
-    if token.kind == "slot":
-        if token.normalized in sheet.slots():
-            return _special_check(token, "ok", "Platzhalter", section, [f"slot:{token.normalized}"])
-        return _special_check(token, "invented", "unbekannter Platzhalter", section)
+def _check_special(token: SpecialToken, sheet: FactSheet, section: str, text: str) -> NumberCheck:
+    if token.kind == "numeral":
+        reason = "Zahlwort oder Zahlzeichen; Zahlen nur als Ziffern aus der Faktenliste"
+        return _special_check(token, "invented", reason, section)
     if token.kind == "reference":
         allowed = ", ".join(sorted(ALLOWED_REFERENCES))
         reason = f"Normverweis nicht zulässig (zulässig: {allowed}; ohne Ausgabejahr)"
         return _special_check(token, "invented", reason, section)
     known = sheet.dates if token.kind == "date" else sheet.times
     if token.normalized in known:
+        sentence = sentence_around(text, token.start, token.end)
+        if DEADLINE.search(sentence) or not CAPTURE.search(sentence):
+            reason = (
+                "Aufnahmezeitpunkt, aber nicht als Aufnahme bezeichnet oder als Frist verwendet"
+            )
+            return _special_check(token, "misattributed", reason, section, ["image.captured_at"])
         return _special_check(token, "ok", "Aufnahmezeitpunkt", section, ["image.captured_at"])
     label = "Datum" if token.kind == "date" else "Uhrzeit"
     return _special_check(token, "invented", f"{label} nicht exakt wie in der Faktenliste", section)
@@ -323,50 +340,9 @@ def check_text(text: str, sheet: FactSheet, *, section: str = "text") -> Faithfu
     """Free-text mode: check every numeric token against the case facts."""
     extraction = extract(text, identifiers=_identifier_items(sheet))
     checks = [_check_number(token, sheet, section) for token in extraction.numbers]
-    checks += [_check_special(token, sheet, section) for token in extraction.specials]
+    checks += [_check_special(token, sheet, section, text) for token in extraction.specials]
     checks.sort(key=lambda check: check.start)
     return FaithfulnessResult(checks=checks, masked=_masked(extraction, section))
-
-
-def check_slot_text(text: str, sheet: FactSheet, *, section: str = "text") -> FaithfulnessResult:
-    """Slot mode, raw draft: placeholders must exist and nothing numeric may be written."""
-    extraction = extract(text, identifiers=_identifier_items(sheet), slots=True)
-    outside = "Zahl außerhalb eines Platzhalters"
-    checks = [_number_check(token, "invented", outside, section) for token in extraction.numbers]
-    for token in extraction.specials:
-        if token.kind in {"slot", "reference"}:
-            checks.append(_check_special(token, sheet, section))
-        else:
-            checks.append(_special_check(token, "invented", outside, section))
-    checks.sort(key=lambda check: check.start)
-    return FaithfulnessResult(checks=checks, masked=_masked(extraction, section))
-
-
-_PLACEHOLDER = re.compile(r"\{([a-z0-9_]+)\}")
-
-
-def render_with_spans(text: str, sheet: FactSheet) -> tuple[str, list[tuple[int, int]]]:
-    """Insert known placeholders; return the text and the spans of inserted values."""
-    slots = sheet.slots()
-    parts: list[str] = []
-    spans: list[tuple[int, int]] = []
-    position = length = 0
-    for match in _PLACEHOLDER.finditer(text):
-        parts.append(text[position : match.start()])
-        length += match.start() - position
-        value = slots.get(match[1], match[0])
-        if match[1] in slots:
-            spans.append((length, length + len(value)))
-        parts.append(value)
-        length += len(value)
-        position = match.end()
-    parts.append(text[position:])
-    return "".join(parts), spans
-
-
-def render_slots(text: str, sheet: FactSheet) -> str:
-    """Replace known placeholders by their values; unknown ones stay visible."""
-    return render_with_spans(text, sheet)[0]
 
 
 def merge(results: list[FaithfulnessResult]) -> FaithfulnessResult:
@@ -379,28 +355,6 @@ def merge(results: list[FaithfulnessResult]) -> FaithfulnessResult:
 def check_sections(sections: Mapping[SectionName, str], sheet: FactSheet) -> FaithfulnessResult:
     """Free-text mode: check each report section and merge the results."""
     return merge([check_text(text, sheet, section=name) for name, text in sections.items()])
-
-
-def check_slot_sections(raw: Mapping[SectionName, str], sheet: FactSheet) -> FaithfulnessResult:
-    """Slot mode: no literal numbers in the raw draft, then role binding on the rendered one.
-
-    Rendered numbers are exact by construction, so the second pass only finds placeholders
-    used in the wrong place (``Die Druckfestigkeit beträgt {obere_grenze}``).
-    """
-    checks: list[NumberCheck] = []
-    masked: list[MaskedText] = []
-    for name, text in raw.items():
-        literal = check_slot_text(text, sheet, section=name)
-        checks += [check for check in literal.checks if check.status != "ok"]
-        masked += literal.masked
-        rendered, spans = render_with_spans(text, sheet)
-        # Literal numbers were judged above; here only the inserted values are bound.
-        checks += [
-            check
-            for check in check_text(rendered, sheet, section=name).checks
-            if any(start <= check.start < end for start, end in spans)
-        ]
-    return FaithfulnessResult(checks=checks, masked=masked)
 
 
 def describe_violations(result: FaithfulnessResult) -> list[str]:

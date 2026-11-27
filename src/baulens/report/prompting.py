@@ -24,7 +24,7 @@ from baulens.report.schemas import (
 )
 
 DEFAULT_TEMPLATE = "report_v2"
-DEFAULT_SLOT_TEMPLATE = "report_slots_v1"
+DEFAULT_SLOT_TEMPLATE = "report_slots_v2"
 
 
 class ChatMessage(BaseModel):
@@ -102,10 +102,7 @@ def draft_schema(sheet: FactSheet) -> dict[str, Any]:
 
 
 def _slot_lines(sheet: FactSheet) -> str:
-    lines = [
-        f"- {{{fact.slot}}}{fact.display.removeprefix(fact.number)} = {fact.display} ({fact.label})"
-        for fact in sheet.facts
-    ]
+    lines = [f"- {{{fact.slot}}} = {fact.display} ({fact.label})" for fact in sheet.facts]
     lines += [f"- {{{slot.slot}}} = {slot.text} ({slot.label})" for slot in sheet.text_slots]
     return "\n".join(lines)
 
@@ -119,7 +116,7 @@ def _info_lines(sheet: FactSheet) -> str:
         line
         for group in sheet.groups
         for line in group.lines
-        if not _NUMERIC.search(line.split(":", 1)[-1]) or line.startswith("Modell:")
+        if not _NUMERIC.search(line.split(":", 1)[-1])
     ]
     return "\n".join(f"- {line}" for line in lines)
 

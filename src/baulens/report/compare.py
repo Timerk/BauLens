@@ -36,6 +36,7 @@ from baulens.report.generate import (
     input_sha256,
     prompt_for,
 )
+from baulens.report.labelled import evaluate_labelled, labelled_summary
 from baulens.report.metrics import (
     TEMPLATE_ROW,
     ModelMetrics,
@@ -63,6 +64,7 @@ class RunManifest(BaseModel):
 
     model: str
     mode: Mode
+    source: Source
     prompt_version: str
     checker_version: str
     options: dict[str, float | int | str]
@@ -147,11 +149,16 @@ def _options(config: ReportConfig) -> dict[str, float | int | str]:
 
 
 def manifest_for(
-    model: str, mode: Mode, cases: Sequence[InspectionInput], config: ReportConfig
+    model: str,
+    mode: Mode,
+    cases: Sequence[InspectionInput],
+    config: ReportConfig,
+    source: Source = "live",
 ) -> RunManifest:
     return RunManifest(
         model=model,
         mode=mode,
+        source=source,
         prompt_version=prompt_for(config, mode).prompt_version,
         checker_version=CHECKER_VERSION,
         options=_options(config),
@@ -222,7 +229,7 @@ def run_mode(
         metrics.model_dump_json(indent=2), encoding="utf-8"
     )
     if clean:
-        manifest = manifest_for(model, mode, cases, config)
+        manifest = manifest_for(model, mode, cases, config, client.source)
         manifest_path(run_dir, model, mode).write_text(
             manifest.model_dump_json(indent=2), encoding="utf-8"
         )
@@ -247,7 +254,12 @@ def rescore(
 
 
 def reusable(
-    run_dir: Path, model: str, mode: Mode, cases: Sequence[InspectionInput], config: ReportConfig
+    run_dir: Path,
+    model: str,
+    mode: Mode,
+    cases: Sequence[InspectionInput],
+    config: ReportConfig,
+    source: Source = "live",
 ) -> tuple[ModelMetrics | None, str]:
     """Metrics of an earlier (model, mode) run if it is provably the same run, else a reason."""
     path, saved = results_path(run_dir, model, mode), manifest_path(run_dir, model, mode)
@@ -258,12 +270,15 @@ def reusable(
         results = load_results(path)
     except (ValidationError, ValueError) as error:
         return None, f"unreadable earlier run ({error.__class__.__name__})"
-    expected = manifest_for(model, mode, cases, config)
-    for field in ("model", "mode", "prompt_version", "checker_version", "options", "inputs"):
+    expected = manifest_for(model, mode, cases, config, source)
+    fields = ("model", "mode", "source", "prompt_version", "checker_version", "options", "inputs")
+    for field in fields:
         if getattr(manifest, field) != getattr(expected, field):
             return None, f"{field} differs from the earlier run"
     if {result.case_id: result.input_sha256 for result in results} != expected.inputs:
         return None, "stored results do not match the current inputs"
+    if any(result.source != source or result.model != model for result in results):
+        return None, "stored results come from another source or model"
     results = rescore(results, cases)
     _write_results(path, results)
     previous = metrics_path(run_dir, model, mode)
@@ -364,7 +379,7 @@ def run_comparison(
         all_clean = True
         for mode in config.compare_modes:
             if resume_dir is not None:
-                previous, reason = reusable(run_dir, model, mode, cases, config)
+                previous, reason = reusable(run_dir, model, mode, cases, config, source)
                 if previous is not None:
                     progress(f"{model}/{mode}: reusing results from {run_dir}")
                     rows.append(previous)
@@ -426,6 +441,13 @@ def run_comparison(
     run = ComparisonRun(info=info, metrics=rows, run_dir=str(run_dir))
     (run_dir / "summary.json").write_text(run.model_dump_json(indent=2), encoding="utf-8")
     block = summary_block(run)
+    labelled = project_path(config.labelled_path) if config.labelled_path else None
+    if labelled is not None and labelled.exists():
+        block += (
+            "\nChecker on the hand-labelled sentences of "
+            "[`labelled_sentences.yaml`](../../data/report_cases/labelled_sentences.yaml):\n\n"
+            + labelled_summary(evaluate_labelled(labelled, cases))
+        )
     (run_dir / "summary.md").write_text(block, encoding="utf-8")
     if config.figures_dir is not None:
         subtitle = (

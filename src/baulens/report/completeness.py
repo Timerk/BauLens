@@ -48,6 +48,14 @@ _CRACK = re.compile(
 """An explicit positive finding; a crack section that only lists numbers does not state one."""
 
 
+def crack_finding_consistent(finding: str, label: str) -> bool:
+    """The crack section states the finding explicitly and in line with the label."""
+    negated = bool(_NO_CRACK.search(finding))
+    if label == "no_crack":
+        return negated
+    return bool(_CRACK.search(finding)) and not negated
+
+
 def _item(name: str, satisfied: bool, detail: str) -> CompletenessItem:
     return CompletenessItem(name=name, satisfied=satisfied, detail=detail)
 
@@ -102,14 +110,7 @@ def check_completeness(
     if case.crack is not None:
         fact_item("crack_probability", "crack.crack_probability")
         fact_item("crack_threshold", "crack.threshold")
-        finding = sections.get("rissbefund", "")
-        negated = bool(_NO_CRACK.search(finding))
-        # The finding must be stated explicitly and match the label.
-        consistent = (
-            negated
-            if case.crack.label == "no_crack"
-            else bool(_CRACK.search(finding)) and not negated
-        )
+        consistent = crack_finding_consistent(sections.get("rissbefund", ""), case.crack.label)
         items.append(_item("crack_label", consistent, f"Klassifikation {case.crack.label}"))
         items.append(_item("patch_caveat", bool(_PATCH.search(text)), "nur Bildausschnitt"))
         items.append(_item("visual_inspection", bool(_VISUAL.search(text)), "Sichtprüfung vor Ort"))

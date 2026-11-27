@@ -268,7 +268,9 @@ def _print_checks(console: Console, checks: list[NumberCheck]) -> None:
 @report_app.command("generate")
 def report_generate(
     input_path: CaseOption,
-    model: Annotated[str | None, typer.Option(help="Model tag; default: first in config.")] = None,
+    model: Annotated[
+        str | None, typer.Option(help="Model tag; default: default_model in config.")
+    ] = None,
     mode: Annotated[
         ReportMode | None, typer.Option(help="live, replay or template; default BAULENS_LLM_MODE.")
     ] = None,
@@ -284,7 +286,7 @@ def report_generate(
     settings = Settings()
     case = _read_case(input_path)
     selected = mode or ReportMode(settings.llm_mode)
-    model_name = model or config.models[0]
+    model_name = model or config.default_model
     chosen: GenerationMode = generation.value if generation else config.generation_mode
     result: ReportResult
     if selected is ReportMode.TEMPLATE:

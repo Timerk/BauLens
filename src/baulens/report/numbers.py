@@ -3,22 +3,23 @@
 The output locale is German only: decimal comma, ``.`` or a (narrow) space as thousands
 separator in groups of three. ``61.9`` is flagged as a foreign format and ``1,040`` is 1,04.
 
-Extraction runs in a fixed order on a copy of the text in which every handled span is
-blanked, so no digit is read twice and none is skipped:
+This module serves the free-text mode. Extraction runs in a fixed order on a copy of the
+text in which every handled span is blanked, so no digit is read twice and none is skipped:
 
-1. slot placeholders ``{name}`` (slot mode);
-2. identifiers copied verbatim from the input, only as whole tokens; identifiers that look
-   like numbers (``123456``, ``999kg``) only directly after a label ("Fall", "Version", …);
-3. standard references (``DIN EN 12390-3``); allow-listed ones are masked, others become
+1. identifiers copied verbatim from the input, only as the complete string and only as a
+   whole token; identifiers that look like numbers (``123456``, ``999kg``) only directly
+   after a label ("Fall", "Version", …). Parts of an identifier are never masked, so a
+   strength class inside an element name ("Wand C30/37") does not excuse "über C30/37";
+2. standard references (``DIN EN 12390-3``); allow-listed ones are masked, others become
    ``reference`` tokens;
-4. dates (``14.03.2026``, ISO and month-name forms) and clock times (``10:15``, ``10:15:59``)
+3. dates (``14.03.2026``, ISO and month-name forms) and clock times (``10:15``, ``10:15:59``)
    as whole tokens;
-5. single-digit list markers at the start of a line;
-6. numbers with sign, grouping, decimals, the unit right after them and the words around them;
-7. German cardinal number words up to the hundreds of thousands ("dreihundertfünfundsechzig").
+4. ASCII-digit numbers with sign, grouping, decimals, the unit right after them and the words
+   around them;
+5. every other numeral (number words in any form, non-ASCII digits, Roman numerals) from
+   :mod:`baulens.report.numerals`, reported as ``numeral`` tokens that never match a fact.
 
-Out of scope (documented): ordinals ("zweite"), fractions in words ("halb"), the article
-"ein/eine" as the number one, and vague plurals ("Hunderte").
+There is no exemption for list markers: "1." in prose is a number like any other.
 """
 
 import re
@@ -26,9 +27,11 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Literal
 
-TokenKind = Literal["number", "word"]
-SpecialKind = Literal["date", "time", "reference", "slot"]
-MaskKind = Literal["identifier", "standard", "enumeration"]
+from baulens.report.numerals import find_numerals
+
+TokenKind = Literal["number"]
+SpecialKind = Literal["date", "time", "reference", "slot", "numeral"]
+MaskKind = Literal["identifier", "standard"]
 
 _BLANK = "█"
 _SPACES = " \u00a0\u202f\u2009"
@@ -142,20 +145,19 @@ _DATES = (
     ),
 )
 _TIME = re.compile(r"(?<![\d:])\d{1,2}:\d{2}(?::\d{2})?(?![\d:])")
-_ENUMERATION = re.compile(r"(?m)^[ \t]*(?:[-*•][ \t]*)?(\d)[.)](?=[ \t]+\D)")
 _UNIT_EXPONENT = re.compile(r"(?<=/)(m|mm|cm|dm)([23])(?!\d)")
 
 _NUMBER = re.compile(
     r"""
-    (?<!\d)
+    (?<![0-9])
     (?:
-        (?P<grouped>\d{1,3}(?:\.\d{3})+(?:,\d+)?)                  # 1.040 / 1.040,5
-      | (?P<spaced>\d{1,3}(?:[ \u00a0\u202f\u2009]\d{3})+(?:,\d+)?)  # 1 040 / 1 040,5
-      | (?P<english>\d{1,3}(?:,\d{3})+\.\d+|\d+\.\d+)              # 1,040.5 / 61.9
-      | (?P<decimal>\d+,\d+)                                      # 61,9 / 1,040
-      | (?P<integer>\d+)
+        (?P<grouped>[0-9]{1,3}(?:\.[0-9]{3})+(?:,[0-9]+)?)                  # 1.040 / 1.040,5
+      | (?P<spaced>[0-9]{1,3}(?:[ \u00a0\u202f\u2009][0-9]{3})+(?:,[0-9]+)?)  # 1 040 / 1 040,5
+      | (?P<english>[0-9]{1,3}(?:,[0-9]{3})+\.[0-9]+|[0-9]+\.[0-9]+)              # 1,040.5 / 61.9
+      | (?P<decimal>[0-9]+,[0-9]+)                                      # 61,9 / 1,040
+      | (?P<integer>[0-9]+)
     )
-    (?![\d])
+    (?![0-9])
     """,
     re.VERBOSE,
 )
@@ -174,6 +176,7 @@ _OTHER_UNIT = re.compile(
     r"^(t|kg|g|mg|kN|N|MN|Pa|kPa|GPa|psi|bar|l|ml|m|cm|mm|km|µm|h|min|s|K|°C|°|‰|ppm|"
     r"Jahr\w*|Monat\w*|Woche\w*|Stunde\w*|Minute\w*|Sekunde\w*|Grad|Prozentpunkt\w*)$"
 )
+_PERCENT_POINTS = re.compile(r"[ \u00a0]?-?[ \u00a0]?Punkt\w*")
 _CONNECTOR = re.compile(r"^(x|\u00d7)$")
 _RANGE_GAP = re.compile(
     r"^[ \u00a0\u202f\u2009]*(?:[-\u2013\u2014\u2212]|bis)[ \u00a0\u202f\u2009]*$"
@@ -185,89 +188,6 @@ _PAREN_LABEL = re.compile(r"[ \u00a0]*\(([^()\d]{1,60})\)")
 _AFTER_BOUNDARY = re.compile(r"[.!?](?=\s|$)|[,;()\n]|\bund\b|\bsowie\b")
 _SIGN_CHARS = "+-\u2212\u2013"
 _SIGN_PRECEDERS = set(_SPACES + "\t\n([{:=/;")
-
-_SMALL = {
-    "null": 0,
-    "eins": 1,
-    "zwei": 2,
-    "drei": 3,
-    "vier": 4,
-    "fünf": 5,
-    "sechs": 6,
-    "sieben": 7,
-    "acht": 8,
-    "neun": 9,
-    "zehn": 10,
-    "elf": 11,
-    "zwölf": 12,
-    "dreizehn": 13,
-    "vierzehn": 14,
-    "fünfzehn": 15,
-    "sechzehn": 16,
-    "siebzehn": 17,
-    "achtzehn": 18,
-    "neunzehn": 19,
-}
-_TENS = {
-    "zwanzig": 20,
-    "dreißig": 30,
-    "dreissig": 30,
-    "vierzig": 40,
-    "fünfzig": 50,
-    "sechzig": 60,
-    "siebzig": 70,
-    "achtzig": 80,
-    "neunzig": 90,
-}
-_UNIT_PREFIX = {
-    "ein": 1,
-    "zwei": 2,
-    "drei": 3,
-    "vier": 4,
-    "fünf": 5,
-    "sechs": 6,
-    "sieben": 7,
-    "acht": 8,
-    "neun": 9,
-}
-_WORD = re.compile(r"(?<![\w])[A-Za-zÄÖÜäöüß]+(?![\w])")
-
-
-def _below_hundred(word: str) -> int | None:
-    if word in _SMALL:
-        return _SMALL[word]
-    if word in _TENS:
-        return _TENS[word]
-    head, separator, tail = word.partition("und")
-    if separator and head in _UNIT_PREFIX and tail in _TENS:
-        return _UNIT_PREFIX[head] + _TENS[tail]
-    return None
-
-
-def _below_thousand(word: str) -> int | None:
-    if "hundert" not in word:
-        return _below_hundred(word)
-    head, _, tail = word.partition("hundert")
-    hundreds = 1 if head in {"", "ein"} else _UNIT_PREFIX.get(head)
-    rest = 0 if tail == "" else _below_hundred(tail)
-    if hundreds is None or rest is None:
-        return None
-    return hundreds * 100 + rest
-
-
-def parse_number_word(word: str) -> int | None:
-    """Value of a German cardinal number word below one million, otherwise ``None``."""
-    lowered = word.lower()
-    if lowered in {"ein", "eine", "einer", "einem", "einen", "eines"}:
-        return None
-    if "tausend" not in lowered:
-        return _below_thousand(lowered)
-    head, _, tail = lowered.partition("tausend")
-    thousands = 1 if head in {"", "ein"} else _below_thousand(head)
-    rest = 0 if tail == "" else _below_thousand(tail)
-    if thousands is None or rest is None:
-        return None
-    return thousands * 1000 + rest
 
 
 def normalize_reference(text: str) -> str:
@@ -357,9 +277,6 @@ def _mask_structure(
             masker.special("date", *match.span(), match.group())
     for match in list(_TIME.finditer(masker.text)):
         masker.special("time", *match.span(), match.group())
-    for match in list(_ENUMERATION.finditer(masker.text)):
-        masker.mask("enumeration", *match.span(1))
-        masker.blank(match.end(1), match.end(1) + 1)
 
 
 def _last_boundary(text: str, position: int) -> int:
@@ -370,11 +287,6 @@ def _last_boundary(text: str, position: int) -> int:
 def _next_boundary(text: str, position: int, limit: int) -> int:
     match = _AFTER_BOUNDARY.search(text, position, limit)
     return match.start() if match else limit
-
-
-def _is_sentence_initial(text: str, position: int) -> bool:
-    before = text[:position].rstrip(_SPACES + "\t")
-    return not before or before[-1] in ".!?:\n"
 
 
 @dataclass(frozen=True)
@@ -392,15 +304,6 @@ def _spans(text: str) -> list[_Span]:
     for match in _NUMBER.finditer(text):
         digits, value, foreign = _digits(match)
         spans.append(_Span(match.start(), match.end(), "number", digits, value, foreign))
-    for match in _WORD.finditer(text):
-        word = match.group()
-        if word[0].isupper() and not _is_sentence_initial(text, match.start()):
-            continue
-        number = parse_number_word(word)
-        if number is not None:
-            spans.append(
-                _Span(match.start(), match.end(), "word", str(number), Decimal(number), False)
-            )
     return sorted(spans, key=lambda span: span.start)
 
 
@@ -411,8 +314,13 @@ def _unit_after(text: str, position: int) -> tuple[str | None, str, int]:
     unit_text = match["unit"]
     if _CONNECTOR.match(unit_text):
         return None, "", position
-    if unit_text.startswith("%-") or unit_text.startswith("%"):
-        return "%", "%", match.start("unit") + 1
+    if unit_text.startswith("%"):
+        percent_end = match.start("unit") + 1
+        points = _PERCENT_POINTS.match(text, percent_end)
+        if points:
+            # "%-Punkte" are percentage points, a different quantity than percent.
+            return "other", text[match.start("unit") : points.end()], points.end()
+        return "%", "%", percent_end
     kind = classify_unit(unit_text)
     if kind is None:
         return None, "", position
@@ -495,6 +403,10 @@ def extract(
     masker = _Masker(text)
     _mask_structure(masker, identifiers, slots)
     numbers = _number_tokens(masker.text, text)
+    # Everything numeric the German parser does not read (number words, non-ASCII digits,
+    # Roman numerals) is reported as a numeral and never matches a fact.
+    for numeral in find_numerals(masker.text, include_ascii_digits=False):
+        masker.special("numeral", numeral.start, numeral.end, numeral.text)
     return Extraction(
         numbers=tuple(numbers),
         specials=tuple(sorted(masker.specials, key=lambda token: token.start)),

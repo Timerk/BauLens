@@ -65,7 +65,15 @@ def compute_metrics(
     load_time_s: float | None = None,
     loaded_size_bytes: int | None = None,
 ) -> ModelMetrics:
-    """Aggregate per-case results. Only ``baseline=True`` credits template reports."""
+    """Aggregate per-case results. Only ``baseline=True`` credits template reports.
+
+    Replay misses, whether before the first call or after some recorded calls ("partial"),
+    are counted in ``replay_misses`` and excluded from every rate, mean and latency: a
+    replay that does not cover a case says nothing about the model on that case.
+    """
+    all_results = results
+    misses = sum(result.status == "replay_miss" for result in results)
+    results = [result for result in results if result.status != "replay_miss"]
     if baseline:
         first_valid = [result.status == "template" for result in results]
         delivered_ok = first_valid
@@ -109,7 +117,7 @@ def compute_metrics(
     return ModelMetrics(
         model=model,
         mode=mode,
-        cases=len(results),
+        cases=len(all_results),
         schema_valid_first=_rate(first_valid),
         schema_valid=_rate([result.candidate is not None for result in results]),
         faithful_initial=_rate(
@@ -119,7 +127,7 @@ def compute_metrics(
         rejected=sum(result.status == "rejected" for result in results),
         invalid=sum(result.status == "invalid" for result in results),
         errors=sum(result.status == "error" for result in results),
-        replay_misses=sum(result.status == "replay_miss" for result in results),
+        replay_misses=misses,
         violations_per_report=violations,
         completeness_mean=statistics.fmean(scores) if scores else None,
         completeness_accepted_mean=statistics.fmean(accepted_scores) if accepted_scores else None,
@@ -154,7 +162,7 @@ def metrics_table(rows: Sequence[ModelMetrics]) -> str:
     quality = [
         "| Model / mode | Cases | Schema-valid (1st try / final) | No detected violation, "
         "first draft | Accepted after retry | Rejected / invalid / error / replay miss "
-        "| Violations per first draft (invented / misattributed / inexact / unbound) "
+        "| Violations per first draft (invented / misattributed / inexact / unbound / missing) "
         "| Completeness (drafts / accepted) |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
@@ -165,7 +173,8 @@ def metrics_table(rows: Sequence[ModelMetrics]) -> str:
             f"{_percent(row.schema_valid)} | {_percent(row.faithful_initial)} | "
             f"{_percent(row.faithful_final)} | {row.rejected} / {row.invalid} / {row.errors} / "
             f"{row.replay_misses} | {v['invented']:.2f} / {v['misattributed']:.2f} / "
-            f"{v['inexact']:.2f} / {v['unbound']:.2f} | {_number(row.completeness_mean, 2)} / "
+            f"{v['inexact']:.2f} / {v['unbound']:.2f} / {v['missing']:.2f} | "
+            f"{_number(row.completeness_mean, 2)} / "
             f"{_number(row.completeness_accepted_mean, 2)} |"
         )
     resources = [

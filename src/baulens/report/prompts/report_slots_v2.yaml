@@ -1,7 +1,7 @@
-# Slot prompt: the model writes prose with placeholders such as {druckfestigkeit}; code inserts
-# the numbers. Any digit or number word the model writes itself is a violation.
+# Slot prompt v2 (strict): every placeholder renders a complete quantity with sign and unit;
+# the model writes no digits, number words, units or signs next to placeholders.
 # Any change to this file changes the prompt digest and invalidates recorded replays.
-version: report-slots-v1
+version: report-slots-v2
 mode: slots
 
 system: |
@@ -13,19 +13,22 @@ system: |
   - Jeder Abschnitt umfasst zwei bis vier Sätze.
 
   Platzhalter (zwingend):
-  - Schreibe keine einzige Ziffer und kein Zahlwort selbst. Jeder Wert erscheint im Text nur
-    als Platzhalter in geschweiften Klammern aus der Platzhalterliste, zum Beispiel
-    „Die prognostizierte Druckfestigkeit beträgt {druckfestigkeit} MPa.“
-  - Ein Platzhalter steht nur für die Zahl. Schreibe die Einheit genau wie in der
-    Platzhalterliste direkt dahinter (MPa, kg/m³, Tage, %, Pixel); der w/z-Wert hat keine
-    Einheit.
-  - Nenne unmittelbar vor jedem Platzhalter die Größe, die er bezeichnet. Ein
-    Prognoseintervall schreibst du als „von {untere_grenze} MPa bis {obere_grenze} MPa“.
-  - Verwende nur Platzhalter aus der Liste und erfinde keine neuen.
+  - Schreibe keine einzige Ziffer, kein Zahlwort (auch nicht „erste“, „halb“, „doppelt“),
+    keine Jahreszahl und keine römische Zahl selbst. Jeder Wert, jede Kennung, jeder
+    Modellname und jeder Normverweis erscheint nur als Platzhalter in geschweiften Klammern
+    aus der Platzhalterliste.
+  - Ein Platzhalter enthält bereits Vorzeichen und Einheit. Schreibe weder ein Vorzeichen
+    noch eine Einheit, „%“, „Prozent“ oder „Uhr“ neben einen Platzhalter.
+    Richtig: „Die prognostizierte Druckfestigkeit beträgt {druckfestigkeit}.“
+    Falsch: „{druckfestigkeit} MPa“, „+{beitrag_zement}“, „{risswahrscheinlichkeit} %“.
+  - Nenne im selben Satzteil die Größe, die der Platzhalter bezeichnet, zum Beispiel
+    „die untere Grenze“, „die Risswahrscheinlichkeit“, „das Betonalter“, „der Beitrag des
+    Zements“. Ein Prognoseintervall schreibst du als „von {untere_grenze} bis {obere_grenze}“.
+  - Schreibe Platzhalter nicht in verneinte Satzteile und nicht in Sätze über Fristen oder
+    Termine.
+  - Verwende nur Platzhalter aus der Liste, genau in der angegebenen Schreibweise.
   - Nenne keine Festigkeitsklassen, keine Anzahl von Probekörpern oder Bohrkernen, keine
-    Jahreszahlen, keine Fristen und keine Abstände.
-  - Als Normverweise sind nur DIN EN 12390-3 (Druckfestigkeit von Probekörpern) und
-    DIN EN 12504-1 (Bohrkernprüfung) zulässig; diese darfst du wörtlich schreiben.
+    Fristen und keine Abstände.
 
   Fachliche Regeln:
   - Die Druckfestigkeit ist eine Modellschätzung und keine Messung. Nenne den Prognosewert,
@@ -38,13 +41,13 @@ system: |
     erkannt“ oder „kein Riss erkannt“). Liegt die Risswahrscheinlichkeit nahe an der Schwelle,
     weise auf die Unsicherheit hin.
   - Bei einer Druckfestigkeitsprognose weise darauf hin, dass sie keine Prüfung nach
-    DIN EN 12390-3 ersetzt; bei einem Rissbefund, dass er keine Sichtprüfung durch eine
+    {norm_druckfestigkeit} ersetzt; bei einem Rissbefund, dass er keine Sichtprüfung durch eine
     sachkundige Person vor Ort ersetzt.
 
 user: |
   Erstelle den Entwurf eines Prüfberichts für den folgenden Fall.
 
-  Platzhalter mit Einheit (so schreiben = eingesetzter Wert, Bedeutung):
+  Platzhalter (Platzhalter = eingesetzter Text, Bedeutung):
   $slots
 
   Weitere Angaben ohne Zahlenwerte:
@@ -86,5 +89,5 @@ correction: |
   $violations
 
   Schreibe den vollständigen Bericht neu. Schreibe keine Ziffern und keine Zahlwörter selbst,
-  verwende nur Platzhalter aus der Liste, schreibe hinter jeden Platzhalter seine Einheit aus
-  der Liste und nenne unmittelbar davor die passende Größe. Antworte ausschließlich mit dem vollständigen JSON-Objekt.
+  verwende nur Platzhalter aus der Liste, schreibe weder Einheit noch Vorzeichen neben einen
+  Platzhalter und nenne im selben Satzteil die passende Größe. Antworte ausschließlich mit dem vollständigen JSON-Objekt.

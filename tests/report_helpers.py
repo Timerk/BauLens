@@ -85,10 +85,12 @@ def template_reply(case: InspectionInput, *, slots: bool = False, **changes: str
     sheet = build_facts(case)
     draft = template_draft(sheet).model_dump(exclude_none=True)
     if slots:
+        # Replace every rendered quantity, identifier and norm by its slot.
+        replacements = {fact.display: fact.slot for fact in sheet.facts}
+        replacements |= {slot.text: slot.slot for slot in sheet.text_slots}
         for name, text in draft.items():
-            for fact in sorted(sheet.facts, key=lambda fact: len(fact.number), reverse=True):
-                for end in (" ", ")"):
-                    text = text.replace(fact.number + end, "{" + fact.slot + "}" + end)
+            for value in sorted(replacements, key=len, reverse=True):
+                text = text.replace(value, "{" + replacements[value] + "}")
             draft[name] = text
     draft.update(changes)
     return json.dumps(draft, ensure_ascii=False)

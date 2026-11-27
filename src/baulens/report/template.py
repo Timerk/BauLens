@@ -56,7 +56,8 @@ def template_draft(sheet: FactSheet) -> ReportDraft:
             f"Für die angegebene Betonrezeptur mit {_shown(sheet, 'mix.cement')} Zement, "
             f"{_shown(sheet, 'mix.water')} Wasser (w/z-Wert "
             f"{_shown(sheet, 'mix.water_cement_ratio')}) und einem Betonalter von {age} "
-            f"prognostiziert das Modell {strength.model_name} eine Druckfestigkeit von {point}. "
+            f"prognostiziert das Modell {strength.model_name} (Version {strength.model_version}) "
+            f"eine Druckfestigkeit von {point}. "
             f"Das Prognoseintervall mit einer nominellen Überdeckung von {coverage} reicht von "
             f"{lower} bis {upper}. {domain}"
         )
@@ -87,7 +88,8 @@ def template_draft(sheet: FactSheet) -> ReportDraft:
         )
         image = f"Das Bild {case.image.filename}" if case.image is not None else "Das Bild"
         crack_text = (
-            f"{image} wurde vom Modell {crack.model_name} mit einer Risswahrscheinlichkeit von "
+            f"{image} wurde vom Modell {crack.model_name} (Version {crack.model_version}) "
+            f"mit einer Risswahrscheinlichkeit von "
             f"{probability} bewertet; die Entscheidungsschwelle liegt bei {threshold}. "
             f"Ergebnis der Klassifikation: {verdict}."
         )

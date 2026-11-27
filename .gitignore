@@ -12,6 +12,7 @@ htmlcov/
 !/data/report_cases/
 !/data/report_replays/
 !/data/report_cases/cases.jsonl
+!/data/report_cases/labelled_sentences.yaml
 !/data/report_replays/qwen2.5_3b.jsonl
 !/data/report_replays/llama3.2_3b.jsonl
 !/data/report_replays/gemma3_4b.jsonl

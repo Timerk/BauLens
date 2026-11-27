@@ -34,9 +34,15 @@ DISCLAIMER = (
 Source = Literal["live", "replay", "fake", "template"]
 Status = Literal["accepted", "rejected", "invalid", "error", "replay_miss", "template"]
 Mode = Literal["free", "slots"]
-CheckStatus = Literal["ok", "invented", "misattributed", "inexact", "unbound"]
-ViolationKind = Literal["invented", "misattributed", "inexact", "unbound"]
-VIOLATION_KINDS: tuple[ViolationKind, ...] = ("invented", "misattributed", "inexact", "unbound")
+CheckStatus = Literal["ok", "invented", "misattributed", "inexact", "unbound", "missing"]
+ViolationKind = Literal["invented", "misattributed", "inexact", "unbound", "missing"]
+VIOLATION_KINDS: tuple[ViolationKind, ...] = (
+    "invented",
+    "misattributed",
+    "inexact",
+    "unbound",
+    "missing",
+)
 
 
 class _Model(BaseModel):
@@ -88,7 +94,7 @@ class NumberCheck(_Model):
     start: int
     end: int
     text: str
-    kind: Literal["number", "word", "date", "time", "reference", "slot"]
+    kind: Literal["number", "numeral", "date", "time", "reference", "slot"]
     value: str | None = None
     unit: str | None = None
     status: CheckStatus
@@ -103,7 +109,7 @@ class MaskedText(_Model):
     start: int
     end: int
     text: str
-    kind: Literal["identifier", "version", "standard", "enumeration"]
+    kind: Literal["identifier", "standard"]
 
 
 class FaithfulnessResult(_Model):

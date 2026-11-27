@@ -26,11 +26,13 @@ Policy:
 import hashlib
 import time
 
+from pydantic import ValidationError
+
 from baulens.config import ReportConfig
 from baulens.report.clients import GenerationOptions, LLMClient, LLMError
 from baulens.report.completeness import check_completeness
 from baulens.report.facts import FactSheet, build_facts
-from baulens.report.faithfulness import check_sections, check_slot_sections, render_slots
+from baulens.report.faithfulness import check_sections
 from baulens.report.prompting import (
     ChatMessage,
     DraftError,
@@ -53,6 +55,7 @@ from baulens.report.schemas import (
     ReportResult,
     Status,
 )
+from baulens.report.slots import check_slot_sections, render_slots
 from baulens.report.template import TEMPLATE_PROVENANCE, template_report
 from baulens.schemas import InspectionInput
 
@@ -125,7 +128,13 @@ def _check(
         return raw, check_sections(raw.sections(), sheet)
     result = check_slot_sections(raw.sections(), sheet)
     rendered = {name: render_slots(text, sheet) for name, text in raw.sections().items()}
-    return ReportDraft.model_validate(rendered), result
+    try:
+        return ReportDraft.model_validate(rendered), result
+    except ValidationError as error:
+        # e.g. a long element name repeated through {bauteil} exceeds a section limit
+        raise DraftError(
+            f"nach dem Einsetzen der Platzhalter ungültig: {error.errors()[0]['msg']}"
+        ) from error
 
 
 def generate_report(
@@ -169,6 +178,7 @@ def generate_report(
             break
         try:
             raw = parse_draft(response.text, sheet)
+            draft, final = _check(raw, sheet, mode)
         except DraftError as error:
             attempts.append(Attempt(kind=kind, response=response, schema_error=str(error)))
             if schema_retries >= config.max_schema_retries:
@@ -181,7 +191,6 @@ def generate_report(
             ]
             kind = "schema_retry"
             continue
-        draft, final = _check(raw, sheet, mode)
         if initial is None:
             initial = final
         candidate = InspectionReport(

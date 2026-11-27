@@ -14,9 +14,8 @@ checker to bind a number to the words around it, and a *slot* name used by the s
 which the model writes ``{druckfestigkeit}`` and code inserts ``61,9 MPa``.
 """
 
-import itertools
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import PurePath
@@ -36,7 +35,6 @@ MINUS = "\u2212"
 STRENGTH_DECIMALS = 1
 MAX_INGREDIENT_DECIMALS = 2
 RATIO_DECIMALS = 2
-MAX_PERCENT_DECIMALS = 6
 
 MIX_LABELS: dict[str, str] = {
     "cement": "Zement",
@@ -66,6 +64,21 @@ _FEATURE_LABELS: dict[str, str] = {
     "w_b_ratio": "w/b-Wert",
 }
 _RATIO_FEATURES = {"water_cement_ratio", "w_c_ratio"}
+FEATURE_TERMS: dict[str, str] = {
+    "cement": r"zement(?!wert)",
+    "blast_furnace_slag": r"hüttensand|schlacke",
+    "fly_ash": r"flugasche",
+    "water": r"wasser(?!zement|-zement)",
+    "superplasticizer": r"fließmittel|fliessmittel",
+    "coarse_aggregate": r"grob|kies",
+    "fine_aggregate": r"fein|sand",
+    "age_days": r"alter",
+    "age": r"alter",
+    "water_cement_ratio": r"w/z|wasserzement|wasser-zement",
+    "w_c_ratio": r"w/z|wasserzement|wasser-zement",
+    "water_binder_ratio": r"w/b|wasserbindemittel|wasser-bindemittel",
+    "w_b_ratio": r"w/b|wasserbindemittel|wasser-bindemittel",
+}
 _AGE_FEATURES = {"age", "age_days"}
 
 
@@ -85,6 +98,9 @@ class Fact:
     """Number with unit, e.g. ``61,9 MPa``."""
     slot: str
     signed: bool = False
+    terms: str | None = None
+    """Regex naming the ingredient or feature (``zement``): a contribution or amount must be
+    stated in a clause that names it."""
 
 
 @dataclass(frozen=True)
@@ -133,9 +149,9 @@ class FactSheet:
         return {fact.role for fact in self.facts}
 
     def slots(self) -> dict[str, str]:
-        """Slot name to inserted text. A number slot inserts only the number; the model writes
-        the unit, and the checker verifies it like any other unit."""
-        rendered = {fact.slot: fact.number for fact in self.facts}
+        """Slot name to inserted text. A number slot inserts the complete quantity, with sign
+        and unit (``61,9 MPa``, a signed ``-3,1 MPa``, ``93,1 %``); the model writes neither."""
+        rendered = {fact.slot: fact.display for fact in self.facts}
         rendered.update({slot.slot: slot.text for slot in self.text_slots})
         return rendered
 
@@ -199,23 +215,31 @@ def _fact(
     return Fact(field, label, role, shown, decimals, unit, number, number + suffix, slot, signed)
 
 
+def exact_decimals(value: Decimal) -> int:
+    """Decimals needed to write ``value`` exactly (``Decimal('49.99999999')`` needs 8)."""
+    exponent = value.normalize().as_tuple().exponent
+    return max(0, -exponent) if isinstance(exponent, int) else 0
+
+
 def decision_preserving_percent(probability: float, threshold: float) -> tuple[int, int]:
     """Decimals (in percent) for probability and threshold that keep the raw comparison.
 
-    The threshold is shown exactly (up to six percent decimals). The probability gets at least
-    one decimal and more until it falls on the same side of the shown threshold as the raw
-    value, and differs from it unless both are equal.
+    There is no precision cap. The threshold is shown exactly. The probability gets at least
+    one decimal and as many more as needed until the shown values compare like the raw ones:
+    same side of the threshold, and different unless the raw values are equal. At the latest
+    this is reached when the probability is shown exactly (0.4999999999 renders as
+    ``49,99999999 %`` against ``50 %``).
     """
     raw_p, raw_t = to_decimal(probability) * 100, to_decimal(threshold) * 100
-    t_decimals = shown_decimals(raw_t, MAX_PERCENT_DECIMALS)
-    shown_t = quantize(raw_t, t_decimals)
-    for p_decimals in range(1, MAX_PERCENT_DECIMALS + 1):
+    t_decimals = exact_decimals(raw_t)
+    limit = max(exact_decimals(raw_p), 1)
+    for p_decimals in range(1, limit + 1):
         shown_p = quantize(raw_p, p_decimals)
-        same_side = (shown_p >= shown_t) == (raw_p >= raw_t)
-        distinct = (shown_p != shown_t) or (raw_p == raw_t)
+        same_side = (shown_p >= raw_t) == (raw_p >= raw_t)
+        distinct = (shown_p != raw_t) or (raw_p == raw_t)
         if same_side and distinct:
             return shown_decimals(shown_p, p_decimals), t_decimals
-    return MAX_PERCENT_DECIMALS, t_decimals
+    return limit, t_decimals
 
 
 def _mix_facts(mix: ConcreteMix) -> tuple[list[Fact], FactGroup]:
@@ -224,8 +248,17 @@ def _mix_facts(mix: ConcreteMix) -> tuple[list[Fact], FactGroup]:
     for name, label in MIX_LABELS.items():
         value = to_decimal(getattr(mix, name))
         decimals = shown_decimals(value, MAX_INGREDIENT_DECIMALS)
-        fact = _fact(
-            f"mix.{name}", label, f"ingredient:{name}", value, decimals, "kg/m³", MIX_SLOTS[name]
+        fact = replace(
+            _fact(
+                f"mix.{name}",
+                label,
+                f"ingredient:{name}",
+                value,
+                decimals,
+                "kg/m³",
+                MIX_SLOTS[name],
+            ),
+            terms=FEATURE_TERMS[name],
         )
         facts.append(fact)
         lines.append(f"{label}: {fact.display}")
@@ -238,6 +271,7 @@ def _mix_facts(mix: ConcreteMix) -> tuple[list[Fact], FactGroup]:
         None,
         "wz_wert",
     )
+    ratio = replace(ratio, terms=FEATURE_TERMS["water_cement_ratio"])
     age = _fact(
         "mix.age_days",
         "Betonalter bei Prüfung",
@@ -253,6 +287,8 @@ def _mix_facts(mix: ConcreteMix) -> tuple[list[Fact], FactGroup]:
 
 
 def _slug(text: str) -> str:
+    for umlaut, replacement in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+        text = text.lower().replace(umlaut, replacement)
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
@@ -263,7 +299,8 @@ def _feature_facts(
     lines: list[str] = []
     for index, item in enumerate(strength.top_features):
         label = _FEATURE_LABELS.get(item.feature, item.feature)
-        slug = _slug(item.feature)
+        slug = _slug(label)
+        terms = FEATURE_TERMS.get(item.feature, re.escape(label.lower()))
         raw = to_decimal(item.value)
         if item.feature in MIX_LABELS:
             value = _fact(
@@ -306,6 +343,8 @@ def _feature_facts(
             f"beitrag_{slug}",
             signed=True,
         )
+        value = replace(value, terms=terms)
+        contribution = replace(contribution, terms=terms)
         # A feature value that renders like an existing fact of the same role adds nothing.
         duplicate = any(
             other.role == value.role and other.number == value.number for other in existing
@@ -354,7 +393,7 @@ def _strength_facts(
         "Nominelle Überdeckung des Prognoseintervalls",
         "coverage",
         raw_coverage,
-        shown_decimals(raw_coverage, MAX_PERCENT_DECIMALS),
+        exact_decimals(raw_coverage),
         "%",
         "ueberdeckung",
     )
@@ -458,20 +497,9 @@ def _identifiers(case: InspectionInput) -> list[Identifier]:
         values += [item.feature for item in case.strength.top_features]
     if case.crack is not None:
         values += [case.crack.model_name, case.crack.model_version]
+    # Only complete identifier strings: a part such as "C30/37" of "Wand C30/37" is never
+    # masked on its own, so it cannot excuse the same characters elsewhere in the text.
     strings = [value for value in values if value and any(char.isdigit() for char in value)]
-    # Reports often quote part of a free-text element name ("Feld C2" from "Decke über EG,
-    # Feld C2"): also its comma-separated parts and its letter-led words with digits.
-    if case.image is not None and case.image.element:
-        element = case.image.element
-        parts = [part.strip() for part in re.split(r"[,;()]", element)]
-        words = [word.strip(".,;()") for word in element.split()]
-        # Two-word pieces survive inflection of the rest ("des Unterzuges Ebene 2").
-        pairs = [f"{first} {second}" for first, second in itertools.pairwise(words)]
-        strings += [
-            piece
-            for piece in parts + pairs + words
-            if any(c.isdigit() for c in piece) and piece[:1].isalpha()
-        ]
     unique = list(dict.fromkeys(strings))
     return [
         Identifier(text, labelled=_looks_numeric(text) or not any(c.isalpha() for c in text))
@@ -509,8 +537,26 @@ def build_facts(case: InspectionInput) -> FactSheet:
             times.append(render_time(case.image.captured_at))
             text_slots += [
                 TextSlot("aufnahmedatum", "Aufnahmedatum", dates[0]),
-                TextSlot("aufnahmezeit", "Aufnahmezeit", times[0]),
+                TextSlot("aufnahmezeit", "Aufnahmezeit", f"{times[0]} Uhr"),
             ]
+    if case.strength is not None:
+        text_slots += [
+            TextSlot(
+                "festigkeitsmodell",
+                "Festigkeitsmodell",
+                f"{case.strength.model_name} (Version {case.strength.model_version})",
+            ),
+            TextSlot("norm_druckfestigkeit", "Norm Druckfestigkeitsprüfung", "DIN EN 12390-3"),
+            TextSlot("norm_bohrkern", "Norm Bohrkernprüfung", "DIN EN 12504-1"),
+        ]
+    if case.crack is not None:
+        text_slots.append(
+            TextSlot(
+                "rissmodell",
+                "Rissmodell",
+                f"{case.crack.model_name} (Version {case.crack.model_version})",
+            )
+        )
     return FactSheet(
         case=case,
         facts=tuple(facts),

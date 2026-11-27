@@ -109,12 +109,16 @@ class ReportConfig(PipelineConfig):
     generation_mode: GenerationMode = "slots"
     compare_modes: list[GenerationMode] = Field(default_factory=_both_modes, min_length=1)
     prompt_template: str = Field(default="report_v2", pattern=r"^[a-z0-9_]+$")
-    slot_prompt_template: str = Field(default="report_slots_v1", pattern=r"^[a-z0-9_]+$")
+    slot_prompt_template: str = Field(default="report_slots_v2", pattern=r"^[a-z0-9_]+$")
+    default_model: str = Field(
+        default="gemma3:4b", description="Model for `report generate`; `models` is compared"
+    )
     max_schema_retries: int = Field(default=1, ge=0, le=3)
     max_correction_retries: int = Field(default=1, ge=0, le=3)
     request_timeout_s: float = Field(default=600.0, gt=0)
     keep_alive: str = "10m"
     cases_path: Path = Path("data/report_cases/cases.jsonl")
+    labelled_path: Path | None = Path("data/report_cases/labelled_sentences.yaml")
     replay_dir: Path = Path("data/report_replays")
     results_doc: Path | None = Path("docs/results/report.md")
     figures_dir: Path | None = Path("docs/figures/report")

@@ -146,6 +146,9 @@ class RecordingClient:
     def begin_case(self, case_id: str, input_sha256: str, prompt_version: str) -> None:
         self._case = (case_id, input_sha256, prompt_version)
         self._calls = 0
+        # A wrapped replay client needs the same case context to find its records.
+        if isinstance(self._inner, ReplayClient):
+            self._inner.begin_case(case_id, input_sha256, prompt_version)
 
     def generate(
         self,
